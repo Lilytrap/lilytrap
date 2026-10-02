@@ -1,0 +1,8 @@
+apiVersion: v2
+name: lilytrap
+description: Decoy secrets for Kubernetes that alert you when an AI agent (or anyone) uses them.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://lilytrap.com
+keywords: [security, honeytoken, deception, ai-agents]

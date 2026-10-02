@@ -1,0 +1,82 @@
+{{- if not (or .Values.lilytrap.apiKey .Values.lilytrap.existingSecret) }}
+{{- fail "Set lilytrap.apiKey (or lilytrap.existingSecret) to your workspace API key." }}
+{{- end }}
+{{- $decoys := include "lilytrap.decoysOnce" . | fromJson }}
+{{- $tokens := list }}
+{{- $seed := "" }}
+{{- range $ns, $d := $decoys }}
+{{- $seed = printf "%s|%s|%s" $seed $d.token $d.password }}
+{{- $tokens = append $tokens (dict "id" (printf "tok_%s" (sha256sum (printf "%s:id" $d.token) | trunc 14)) "kit" "k8s-secret" "kind" "bearer" "secretHash" (sha256sum $d.token) "path" (printf "%s/clusters" $d.path) "method" "GET" "tells" list "locations" (list (printf "secret %s/%s" $ns $d.adminName)) "hop" 1 "resources" (list (printf "k8s-secret:%s/%s" $ns $d.adminName))) }}
+{{- $tokens = append $tokens (dict "id" (printf "tok_%s" (sha256sum (printf "%s:id" $d.password) | trunc 14)) "kit" "registry-auth" "kind" "basic-auth" "secretHash" (sha256sum $d.password) "path" (printf "/v2/_lilytrap/%s" (sha256sum $d.password | trunc 10)) "method" "GET" "tells" list "locations" (list (printf "secret %s/%s" $ns $d.registryName)) "hop" 2 "resources" (list (printf "k8s-secret:%s/%s" $ns $d.registryName))) }}
+{{- end }}
+{{- $manifest := dict "version" 1 "buildId" (printf "bld_helm_%s" (sha256sum $seed | trunc 20)) "createdAt" (now | date "2006-01-02T15:04:05Z07:00") "target" "k8s" "endpoint" (trimSuffix "/" .Values.lilytrap.trapUrl) "source" (dict "kind" "helm" "name" .Release.Name "location" (printf "namespaces %s" (include "lilytrap.namespaces" .))) "tokens" $tokens }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-lilytrap-manifest
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  # Hashes only. The decoy values never leave the cluster.
+  manifest.json: {{ $manifest | toJson | quote }}
+{{- if .Values.lilytrap.apiKey }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-lilytrap-api-key
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  LILYTRAP_API_KEY: {{ .Values.lilytrap.apiKey | quote }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-lilytrap-register
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: register
+          image: {{ .Values.registration.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          env:
+            - name: LILYTRAP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.lilytrap.existingSecret | default (printf "%s-lilytrap-api-key" .Release.Name) }}
+                  key: LILYTRAP_API_KEY
+          command: ["sh", "-c"]
+          args:
+            - >-
+              curl -fsS --retry 3 -X POST {{ trimSuffix "/" .Values.lilytrap.apiUrl }}/v1/builds
+              -H "authorization: Bearer $LILYTRAP_API_KEY" -H "content-type: application/json"
+              --data @/manifest/manifest.json
+          resources: {{ toJson .Values.registration.resources }}
+          volumeMounts:
+            - { name: manifest, mountPath: /manifest, readOnly: true }
+      volumes:
+        - name: manifest
+          configMap:
+            name: {{ .Release.Name }}-lilytrap-manifest

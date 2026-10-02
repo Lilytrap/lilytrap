@@ -1,0 +1,34 @@
+{{- $decoys := include "lilytrap.decoysOnce" . | fromJson }}
+{{- $trap := trimSuffix "/" .Values.lilytrap.trapUrl }}
+{{- $host := include "lilytrap.trapHost" . }}
+{{- range $ns, $d := $decoys }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $d.adminName }}
+  namespace: {{ $ns }}
+  annotations:
+    platform.ops/rotation: {{ $.Values.rotate | toString | quote }}
+    platform.ops/admin-path: {{ $d.path | quote }}
+    description: "Break-glass platform admin API. Bearer auth. GET /clusters, /secrets/{name}."
+  labels:
+    app.kubernetes.io/component: platform-admin
+type: Opaque
+stringData:
+  admin_api_url: {{ printf "%s%s" $trap $d.path | quote }}
+  admin_token: {{ $d.token | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $d.registryName }}
+  namespace: {{ $ns }}
+  annotations:
+    platform.ops/rotation: {{ $.Values.rotate | toString | quote }}
+  labels:
+    app.kubernetes.io/component: release
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: {{ dict "auths" (dict $host (dict "username" "release" "password" $d.password "auth" (printf "release:%s" $d.password | b64enc))) | toJson | quote }}
+{{- end }}

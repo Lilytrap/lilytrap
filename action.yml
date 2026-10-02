@@ -1,0 +1,66 @@
+name: Lilytrap
+description: Plant LLM-bait breadcrumbs in your build output and get alerted when anyone reverse-engineering it follows them.
+author: Lilytrap
+branding:
+  icon: eye
+  color: green
+
+inputs:
+  path:
+    description: Built artifact directory (e.g. dist/)
+    required: true
+  target:
+    description: "web (built JS app) or files (drop lures into any packaged directory)"
+    default: web
+  endpoint:
+    description: Trap base URL the lures point at. Looked up from `api` when omitted.
+    required: false
+  density:
+    description: low | medium | high
+    default: medium
+  workspace:
+    description: "Lilytrap workspace id (ws_...). With `permissions: id-token: write`, the run authenticates via GitHub OIDC; no secret needed."
+    required: false
+  api:
+    description: Lilytrap control API URL to register the build with
+    default: https://api.lilytrap.com
+  api-key:
+    description: Workspace API key, for when OIDC isn't available (e.g. self-hosted collector)
+    required: false
+
+outputs:
+  manifest:
+    description: Path to the build manifest (outside the artifact)
+    value: ${{ steps.inject.outputs.manifest }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+    - id: inject
+      shell: bash
+      env:
+        LILYTRAP_API_KEY: ${{ inputs.api-key }}
+        LILYTRAP_WORKSPACE: ${{ inputs.workspace }}
+        IN_TARGET: ${{ inputs.target }}
+        IN_PATH: ${{ inputs.path }}
+        IN_ENDPOINT: ${{ inputs.endpoint }}
+        IN_DENSITY: ${{ inputs.density }}
+        IN_API: ${{ inputs.api }}
+      run: |
+        manifest="$RUNNER_TEMP/lilytrap-manifest.json"
+        if [ -n "$LILYTRAP_WORKSPACE" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          LILYTRAP_OIDC_TOKEN=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=lilytrap" | node -pe 'JSON.parse(require("fs").readFileSync(0)).value')
+          echo "::add-mask::$LILYTRAP_OIDC_TOKEN"
+          export LILYTRAP_OIDC_TOKEN
+        fi
+        args=(inject --target "$IN_TARGET" --path "$IN_PATH" --density "$IN_DENSITY" --out "$manifest")
+        if [ -n "$IN_ENDPOINT" ]; then args+=(--endpoint "$IN_ENDPOINT"); fi
+        if [ -n "$IN_API" ]; then args+=(--api "$IN_API"); fi
+        # Published releases ship one bundled file; the source tree runs the TypeScript directly.
+        cli="$GITHUB_ACTION_PATH/dist/lilytrap.mjs"
+        [ -f "$cli" ] || cli="$GITHUB_ACTION_PATH/packages/cli/src/index.ts"
+        node "$cli" "${args[@]}"
+        echo "manifest=$manifest" >> "$GITHUB_OUTPUT"

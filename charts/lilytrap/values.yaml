@@ -1,0 +1,28 @@
+lilytrap:
+  # Workspace API key (wsk_...). Used only by the registration Job to send the decoys' hashes.
+  apiKey: ""
+  # Or an existing Secret in the release namespace with the key under LILYTRAP_API_KEY.
+  existingSecret: ""
+  apiUrl: https://api.lilytrap.com
+  # Trap the decoys point at (GET https://api.lilytrap.com/agent/v1/config returns it).
+  trapUrl: https://d3bjf2fihdw81m.cloudfront.net
+
+# Makes the decoys look like they belong: prod-platform-admin, prod-registry-push.
+namePrefix: prod
+
+# Namespaces to plant decoys in. Empty means the release namespace.
+namespaces: []
+
+# Change to rotate every decoy (e.g. --set rotate=$(date +%s)). Without a change, upgrades keep
+# the same values. GitOps tools that render without cluster access (Argo CD) can't read the
+# current values back, so pin them with tokens.* instead.
+rotate: "1"
+tokens:
+  adminToken: ""
+  registryPassword: ""
+
+registration:
+  image: curlimages/curl:8.11.1
+  resources:
+    requests: { cpu: 10m, memory: 16Mi }
+    limits: { memory: 64Mi }
