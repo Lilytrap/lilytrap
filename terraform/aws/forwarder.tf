@@ -10,9 +10,9 @@ module "forwarder" {
   ingest_key        = local.ingest_key
   secret_arn_prefix = trimsuffix(aws_secretsmanager_secret.decoy.arn, regex("-[A-Za-z0-9]{6}$", aws_secretsmanager_secret.decoy.arn))
   secret_name       = local.secret_name
-  ssm_names         = var.ssm_parameter ? [local.param_name] : []
-  access_key_ids    = var.iam_key_decoy ? [aws_iam_access_key.decoy[0].id] : []
-  s3_objects        = var.s3_bucket == null ? [] : [{ bucket = var.s3_bucket, key = local.object_key }]
+  ssm_names         = local.plant_ssm ? [local.param_name] : []
+  access_key_ids    = local.plant_iam ? [aws_iam_access_key.decoy[0].id] : []
+  s3_objects        = local.plant_s3 ? [{ bucket = var.s3_bucket, key = local.object_key }] : []
   tags              = var.tags
 }
 
@@ -71,7 +71,7 @@ resource "aws_cloudtrail" "trail" {
     }
   }
   dynamic "advanced_event_selector" {
-    for_each = var.s3_bucket == null ? [] : [1]
+    for_each = local.plant_s3 ? [1] : []
     content {
       name = "Decoy object reads"
       field_selector {

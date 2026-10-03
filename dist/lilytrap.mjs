@@ -24,9 +24,9 @@ var init_collector = __esm({
 });
 
 // packages/cli/src/index.ts
-import { cp, mkdir as mkdir4, rm as rm2, writeFile as writeFile5 } from "node:fs/promises";
+import { cp, mkdir as mkdir4, rm as rm2, writeFile as writeFile6 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname5, join as join5, relative as relative2, resolve as resolve3 } from "node:path";
+import { dirname as dirname5, join as join6, relative as relative3, resolve as resolve3 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -212,10 +212,127 @@ var newIngestKey = () => `lti_${randomBytes2(30).toString("base64url")}`;
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-async function injectFiles(root, plan) {
+
+// packages/core/src/ignore.ts
+var MAX_IGNORE_PATTERNS = 200;
+var MAX_IGNORE_PATTERN_LENGTH = 300;
+function parseIgnoreFile(text) {
+  return text.split(/\r?\n/).map((line) => trimTrailing(line)).filter((line) => line !== "" && !line.startsWith("#"));
+}
+function ignorePatternProblem(pattern) {
+  if (typeof pattern !== "string") return "not a string";
+  if (!pattern.trim()) return "empty pattern";
+  if (pattern.length > MAX_IGNORE_PATTERN_LENGTH) return `longer than ${MAX_IGNORE_PATTERN_LENGTH} characters`;
+  if (/[\0\r\n]/.test(pattern)) return "contains a line break or NUL";
+  try {
+    compileRule(pattern);
+  } catch {
+    return "not a valid pattern";
+  }
+  return null;
+}
+function compileIgnore(patterns) {
+  const rules = patterns.flatMap((p) => {
+    const line = trimTrailing(p);
+    return line && !line.startsWith("#") ? [compileRule(line)] : [];
+  });
+  return {
+    patterns: rules.map((r) => r.source),
+    ignores(path) {
+      if (!rules.length) return false;
+      const segments = normalize(path).split("/").filter(Boolean);
+      for (let i = 1; i < segments.length; i++) {
+        if (verdict(rules, segments.slice(0, i).join("/"), true)) return true;
+      }
+      return segments.length > 0 && verdict(rules, segments.join("/"), false);
+    }
+  };
+}
+function anyIgnores(...sets) {
+  const present = sets.filter((s) => Boolean(s?.patterns.length));
+  return {
+    patterns: present.flatMap((s) => s.patterns),
+    ignores: (path) => present.some((s) => s.ignores(path))
+  };
+}
+var NO_IGNORE = { patterns: [], ignores: () => false };
+function verdict(rules, path, isDir) {
+  let ignored = false;
+  for (const rule of rules) {
+    if (rule.dirOnly && !isDir) continue;
+    if (rule.re.test(path)) ignored = !rule.negate;
+  }
+  return ignored;
+}
+function compileRule(raw) {
+  let p = raw;
+  let negate = false;
+  if (p.startsWith("!")) {
+    negate = true;
+    p = p.slice(1);
+  } else if (p.startsWith("\\!") || p.startsWith("\\#")) {
+    p = p.slice(1);
+  }
+  const dirOnly = p.endsWith("/");
+  if (dirOnly) p = p.replace(/\/+$/, "");
+  const anchored = p.includes("/");
+  p = p.replace(/^\/+/, "");
+  if (!p) throw new Error("empty pattern");
+  let body = "";
+  const segments = p.split("/");
+  segments.forEach((seg, i) => {
+    const last = i === segments.length - 1;
+    if (seg === "**") {
+      body += last ? i === 0 ? ".*" : ".+" : "(?:[^/]+/)*";
+      return;
+    }
+    body += segmentRegex(seg) + (last ? "" : "/");
+  });
+  const prefix = anchored ? "^" : "^(?:.*/)?";
+  return { source: raw, negate, dirOnly, re: new RegExp(`${prefix}${body}$`) };
+}
+function segmentRegex(seg) {
+  let out = "";
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i];
+    if (c === "\\" && i + 1 < seg.length) {
+      out += escape(seg[++i]);
+    } else if (c === "*") {
+      while (seg[i + 1] === "*") i++;
+      out += "[^/]*";
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (c === "[") {
+      const end = seg.indexOf("]", i + 2);
+      if (end === -1) {
+        out += "\\[";
+        continue;
+      }
+      let cls = seg.slice(i + 1, end);
+      if (cls.startsWith("!")) cls = `^${cls.slice(1)}`;
+      out += `[${cls.replace(/\\/g, "\\\\").replace(/\//g, "")}]`;
+      new RegExp(out);
+      i = end;
+    } else {
+      out += escape(c);
+    }
+  }
+  return out;
+}
+var escape = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+function trimTrailing(line) {
+  const m = /^(.*?)((?:\\ )?)\s*$/.exec(line);
+  return m[2] ? `${m[1]} ` : m[1];
+}
+function normalize(path) {
+  return path.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "");
+}
+
+// packages/core/src/inject/files.ts
+async function injectFiles(root, plan, ignore = NO_IGNORE) {
   const written = [];
   const put = async (candidates, contents) => {
-    const free = candidates.find((c) => !existsSync(join(root, c)));
+    const free = candidates.find((c) => !ignore.ignores(c) && !existsSync(join(root, c)));
     if (!free) return;
     await mkdir(dirname(join(root, free)), { recursive: true });
     await writeFile(join(root, free), contents);
@@ -237,14 +354,14 @@ ${env}
 import { existsSync as existsSync2 } from "node:fs";
 import { chmod, mkdir as mkdir2, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2, join as join2, resolve } from "node:path";
-async function plantHost(root, plan, hostname) {
+async function plantHost(root, plan, hostname, ignore = NO_IGNORE) {
   const base = resolve(root);
   const written = [];
   const absolute = [];
   const placed = /* @__PURE__ */ new Map();
   const carried = /* @__PURE__ */ new Set();
   for (const file of plan.files) {
-    const free = file.candidates.find((c) => !existsSync2(join2(base, c)));
+    const free = file.candidates.find((c) => !ignore.ignores(c) && !existsSync2(join2(base, c)));
     if (!free) continue;
     const path = join2(base, free);
     await mkdir2(dirname2(path), { recursive: true, mode: 448 });
@@ -276,26 +393,31 @@ import { createHash as createHash2 } from "node:crypto";
 import { existsSync as existsSync3 } from "node:fs";
 import { readdir, readFile, stat, writeFile as writeFile3 } from "node:fs/promises";
 import { basename, dirname as dirname3, join as join3, relative } from "node:path";
-async function injectWeb(root, plan) {
-  const entry = await findEntry(root);
+async function injectWeb(root, plan, ignore = NO_IGNORE) {
   const { rng } = plan;
   const chunkName = `${pick(rng, ["internal", "ops-tools", "admin-support", "support"])}-${randomHex(rng, 8)}.js`;
-  const chunkPath = join3(dirname3(entry), chunkName);
   const mapName = `${chunkName}.map`;
+  const entry = await findEntry(root, chunkName, ignore);
+  if (!entry) return { written: [], patched: [], locations: [] };
+  const dir = dirname3(entry);
+  const chunkPath = join3(dir, chunkName);
+  const withMap = !ignore.ignores(relative(root, join3(dir, mapName)));
   const body = plan.modules.map((m) => compact(m.source)).join("\n");
   await writeFile3(chunkPath, `${body}
-//# sourceMappingURL=${mapName}
-`);
+${withMap ? `//# sourceMappingURL=${mapName}
+` : ""}`);
   const sources = [...plan.modules.map((m) => m.path), plan.handoff.path];
-  const sourcemap = {
-    version: 3,
-    file: chunkName,
-    sources: sources.map((s) => `../../${s}`),
-    sourcesContent: [...plan.modules.map((m) => m.source), plan.handoff.markdown],
-    names: [],
-    mappings: ""
-  };
-  await writeFile3(join3(dirname3(entry), mapName), JSON.stringify(sourcemap));
+  if (withMap) {
+    const sourcemap = {
+      version: 3,
+      file: chunkName,
+      sources: sources.map((s) => `../../${s}`),
+      sourcesContent: [...plan.modules.map((m) => m.source), plan.handoff.markdown],
+      names: [],
+      mappings: ""
+    };
+    await writeFile3(join3(dir, mapName), JSON.stringify(sourcemap));
+  }
   const flag = pick(rng, ["__APP_INTERNAL_TOOLS__", "__SUPPORT_MODE__", "__OPS_DEBUG__"]);
   const entrySource = await readFile(entry, "utf8");
   await writeFile3(entry, `${entrySource.trimEnd()}
@@ -303,27 +425,34 @@ async function injectWeb(root, plan) {
 `);
   const patched = [relative(root, entry)];
   if (await updateIntegrity(root, entry)) patched.push("index.html");
-  const written = [relative(root, chunkPath), relative(root, join3(dirname3(entry), mapName))];
-  return { written, patched, locations: [...written, ...sources.map((s) => `${written[1]}#${s}`)] };
+  const written = [relative(root, chunkPath), ...withMap ? [relative(root, join3(dir, mapName))] : []];
+  return { written, patched, locations: withMap ? [...written, ...sources.map((s) => `${written[1]}#${s}`)] : written };
 }
 function compact(source) {
   return source.replace(/\/\*\*[\s\S]*?\*\/\n?/g, "").split("\n").map((line) => line.trim()).filter((line) => line.length > 0).join("\n");
 }
-async function findEntry(root) {
+async function findEntry(root, chunkName, ignore) {
   const html = join3(root, "index.html");
-  if (existsSync3(html)) {
-    const markup = await readFile(html, "utf8");
-    for (const tag of markup.match(/<script\b[^>]*>/g) ?? []) {
-      const src = /\bsrc=["']([^"']+)["']/.exec(tag)?.[1];
-      if (!src || /^(https?:)?\/\//.test(src)) continue;
-      const candidate = join3(root, src.replace(/^\//, "").split("?")[0]);
-      if (existsSync3(candidate)) return candidate;
-    }
+  const markup = existsSync3(html) ? await readFile(html, "utf8") : "";
+  const htmlIgnored = ignore.ignores("index.html");
+  const usable = (file) => {
+    const rel = relative(root, file);
+    if (ignore.ignores(rel) || ignore.ignores(relative(root, join3(dirname3(file), chunkName)))) return false;
+    return !(htmlIgnored && hasIntegrity(markup, basename(file)));
+  };
+  for (const tag of markup.match(/<script\b[^>]*>/g) ?? []) {
+    const src = /\bsrc=["']([^"']+)["']/.exec(tag)?.[1];
+    if (!src || /^(https?:)?\/\//.test(src)) continue;
+    const candidate = join3(root, src.replace(/^\//, "").split("?")[0]);
+    if (existsSync3(candidate) && usable(candidate)) return candidate;
   }
   const jsFiles = await listJs(root);
   if (jsFiles.length === 0) throw new Error(`no JavaScript found under ${root}; is this a built web app?`);
   const sized = await Promise.all(jsFiles.map(async (f) => ({ f, size: (await stat(f)).size })));
-  return sized.sort((a, b) => b.size - a.size)[0].f;
+  return sized.sort((a, b) => b.size - a.size).find(({ f }) => usable(f))?.f ?? null;
+}
+function hasIntegrity(markup, name) {
+  return (markup.match(/<(script|link)\b[^>]*>/g) ?? []).some((tag) => tag.includes(name) && /\bintegrity=/.test(tag));
 }
 async function listJs(dir) {
   const entries = await readdir(dir, { withFileTypes: true, recursive: true });
@@ -517,10 +646,170 @@ Next step: finish the export migration, then rotate everything above.
 `;
 }
 
+// packages/core/src/config.ts
+var CONFIG_SCHEMA_URL = "https://lilytrap.com/schema/lilytrap.json";
+function configProblems(raw) {
+  const problems = [];
+  const obj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+  const keys = (v, at, allowed) => {
+    for (const k of Object.keys(v)) if (!allowed.includes(k)) problems.push(`${at}${k}: unknown key (expected one of ${allowed.join(", ")})`);
+  };
+  const str = (v, at) => {
+    if (v !== void 0 && v !== null && typeof v !== "string") problems.push(`${at}: must be a string or null`);
+  };
+  const strList = (v, at) => {
+    if (v === void 0) return false;
+    if (!Array.isArray(v) || v.some((e) => typeof e !== "string")) {
+      problems.push(`${at}: must be a list of strings`);
+      return false;
+    }
+    return true;
+  };
+  if (!obj(raw)) return ["the file must hold a JSON object"];
+  keys(raw, "", ["$schema", "alerts", "internalIdentities", "ignore"]);
+  str(raw.$schema, "$schema");
+  if (raw.alerts !== void 0) {
+    if (!obj(raw.alerts)) problems.push("alerts: must be an object");
+    else {
+      const a = raw.alerts;
+      keys(a, "alerts.", ["email", "slack", "webhook", "pagerduty", "github"]);
+      str(a.email, "alerts.email");
+      str(a.slack, "alerts.slack");
+      str(a.pagerduty, "alerts.pagerduty");
+      for (const [name, fields] of [["webhook", ["url", "secret"]], ["github", ["repo", "token"]]]) {
+        const v = a[name];
+        if (v === void 0 || v === null) continue;
+        if (!obj(v)) problems.push(`alerts.${name}: must be an object or null`);
+        else {
+          keys(v, `alerts.${name}.`, [...fields]);
+          for (const f of fields) str(v[f], `alerts.${name}.${f}`);
+        }
+      }
+    }
+  }
+  strList(raw.internalIdentities, "internalIdentities");
+  if (strList(raw.ignore, "ignore")) {
+    const list = raw.ignore;
+    if (list.length > MAX_IGNORE_PATTERNS) problems.push(`ignore: at most ${MAX_IGNORE_PATTERNS} patterns`);
+    list.forEach((p, i) => {
+      const problem = ignorePatternProblem(p);
+      if (problem) problems.push(`ignore[${i}] ${JSON.stringify(p.slice(0, 60))}: ${problem}`);
+    });
+  }
+  return problems;
+}
+function interpolateEnv(value, env) {
+  const missing = /* @__PURE__ */ new Set();
+  const walk = (v) => {
+    if (typeof v === "string") {
+      return v.replace(/\$?\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, name) => {
+        if (m.startsWith("$$")) return m.slice(1);
+        const got = env[name];
+        if (got === void 0) missing.add(name);
+        return got ?? "";
+      });
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  const out = walk(value);
+  if (missing.size) throw new Error(`environment variable${missing.size > 1 ? "s" : ""} not set: ${[...missing].join(", ")}`);
+  return out;
+}
+function configToSettings(cfg) {
+  const s = {};
+  const set = (key, v) => {
+    if (v !== void 0) s[key] = v ?? "";
+  };
+  const a = cfg.alerts;
+  if (a) {
+    set("alertEmail", a.email);
+    set("slackWebhook", a.slack);
+    set("pagerdutyKey", a.pagerduty);
+    if (a.webhook === null) {
+      set("webhookUrl", null);
+      set("webhookSecret", null);
+    } else if (a.webhook) {
+      set("webhookUrl", a.webhook.url);
+      set("webhookSecret", a.webhook.secret);
+    }
+    if (a.github === null) {
+      set("githubRepo", null);
+      set("githubToken", null);
+    } else if (a.github) {
+      set("githubRepo", a.github.repo);
+      set("githubToken", a.github.token);
+    }
+  }
+  if (cfg.internalIdentities !== void 0) s.internalIdentities = cfg.internalIdentities;
+  if (cfg.ignore !== void 0) s.ignore = cfg.ignore;
+  return s;
+}
+function settingsToConfig(view) {
+  return {
+    $schema: CONFIG_SCHEMA_URL,
+    alerts: {
+      email: view.alertEmail,
+      slack: view.slackWebhook,
+      // null would clear the write-only half too, so only when nothing is stored.
+      webhook: view.webhookUrl || view.webhookSecretSet ? { url: view.webhookUrl } : null,
+      github: view.githubRepo || view.githubTokenSet ? { repo: view.githubRepo } : null
+    },
+    internalIdentities: view.internalIdentities,
+    ignore: view.ignore
+  };
+}
+function writeOnlySet(view) {
+  return [
+    view.webhookSecretSet ? "alerts.webhook.secret" : null,
+    view.pagerdutySet ? "alerts.pagerduty" : null,
+    view.githubTokenSet ? "alerts.github.token" : null
+  ].filter((x) => x !== null);
+}
+function previewSettings(view, patch) {
+  const next = { ...view };
+  const text = (v, cur) => v === void 0 ? cur : v.trim() || null;
+  const flag = (v, cur) => v === void 0 ? cur : Boolean(v.trim());
+  next.alertEmail = text(patch.alertEmail, view.alertEmail);
+  next.slackWebhook = text(patch.slackWebhook, view.slackWebhook);
+  next.webhookUrl = text(patch.webhookUrl, view.webhookUrl);
+  next.githubRepo = text(patch.githubRepo, view.githubRepo);
+  next.webhookSecretSet = flag(patch.webhookSecret, view.webhookSecretSet);
+  next.pagerdutySet = flag(patch.pagerdutyKey, view.pagerdutySet);
+  next.githubTokenSet = flag(patch.githubToken, view.githubTokenSet);
+  if (patch.internalIdentities) next.internalIdentities = [...new Set(patch.internalIdentities.map((e) => e.trim()).filter(Boolean))];
+  if (patch.ignore) next.ignore = [...new Set(patch.ignore.map((e) => e.trim()).filter(Boolean))];
+  return next;
+}
+function settingsDiff(current, next) {
+  const out = [];
+  const show = (v) => v === null || v === void 0 || v === "" ? "(none)" : JSON.stringify(v);
+  const scalar = [
+    ["alerts.email", current.alertEmail, next.alertEmail],
+    ["alerts.slack", current.slackWebhook, next.slackWebhook],
+    ["alerts.webhook.url", current.webhookUrl, next.webhookUrl],
+    ["alerts.webhook.secret", current.webhookSecretSet, next.webhookSecretSet],
+    ["alerts.pagerduty", current.pagerdutySet, next.pagerdutySet],
+    ["alerts.github.repo", current.githubRepo, next.githubRepo],
+    ["alerts.github.token", current.githubTokenSet, next.githubTokenSet]
+  ];
+  for (const [label, a, b] of scalar) {
+    if (a === b) continue;
+    if (typeof a === "boolean") out.push(`  ${label}: ${a ? "set" : "(none)"} -> ${b ? "set" : "(none)"}`);
+    else out.push(`  ${label}: ${show(a)} -> ${show(b)}`);
+  }
+  for (const [label, a, b] of [["internalIdentities", current.internalIdentities, next.internalIdentities], ["ignore", current.ignore, next.ignore]]) {
+    for (const x of b) if (!a.includes(x)) out.push(`  ${label}: + ${x}`);
+    for (const x of a) if (!b.includes(x)) out.push(`  ${label}: - ${x}`);
+  }
+  return out;
+}
+
 // packages/core/src/index.ts
 async function inject(opts) {
   const plan = planLures({ endpoint: opts.endpoint, density: opts.density, seed: opts.seed });
-  const result = opts.target === "web" ? await injectWeb(opts.path, plan) : await injectFiles(opts.path, plan);
+  const result = opts.target === "web" ? await injectWeb(opts.path, plan, opts.ignore) : await injectFiles(opts.path, plan, opts.ignore);
   const manifest = {
     version: 1,
     buildId: `bld_${randomString(createRng(`${plan.seed}:build`), 16)}`,
@@ -530,14 +819,15 @@ async function inject(opts) {
     repo: opts.repo,
     commit: opts.commit,
     runId: opts.runId,
-    tokens: plan.tokens.map((t) => ({ ...t, locations: [...result.locations] }))
+    // Everything ignored: nothing was planted, so there is nothing to register.
+    tokens: result.written.length ? plan.tokens.map((t) => ({ ...t, locations: [...result.locations] })) : []
   };
   return { manifest, result };
 }
 async function plant(opts) {
   const plan = planHostDecoys({ endpoint: opts.endpoint, seed: opts.seed, awsKey: opts.awsKey });
   const hostname = opts.hostname ?? osHostname();
-  const result = await plantHost(opts.root, plan, hostname);
+  const result = await plantHost(opts.root, plan, hostname, opts.ignore);
   const ingestKey = newIngestKey();
   const manifest = {
     version: 1,
@@ -551,6 +841,16 @@ async function plant(opts) {
   };
   return { manifest, written: result.written, files: result.absolute, ingestKey };
 }
+async function fetchPolicy(apiUrl, credential, workspace) {
+  const headers = {};
+  if (credential) headers.authorization = `Bearer ${credential}`;
+  if (workspace) headers["x-lilytrap-workspace"] = workspace;
+  const res = await fetch(`${apiUrl.replace(/\/+$/, "")}/v1/policy`, { headers });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`reading the workspace's ignore rules failed: ${res.status} ${await res.text()}`);
+  const body = await res.json();
+  return { ignore: Array.isArray(body.ignore) ? body.ignore.filter((p) => typeof p === "string") : [] };
+}
 async function registerBuild(apiUrl, credential, manifest, workspace) {
   const headers = { "content-type": "application/json" };
   if (credential) headers.authorization = `Bearer ${credential}`;
@@ -559,17 +859,89 @@ async function registerBuild(apiUrl, credential, manifest, workspace) {
   if (!res.ok) throw new Error(`registering build failed: ${res.status} ${await res.text()}`);
 }
 
+// packages/cli/src/config.ts
+import { existsSync as existsSync4 } from "node:fs";
+import { readFile as readFile2, writeFile as writeFile4 } from "node:fs/promises";
+async function runConfig(args) {
+  if (args.action === "validate") {
+    const cfg2 = await readConfig(args.file);
+    interpolateEnv(cfg2, process.env);
+    console.log(`lilytrap: ${args.file} is valid`);
+    return;
+  }
+  if (args.action !== "pull" && args.action !== "apply") throw new Error("usage: lilytrap config pull|apply|validate [--file lilytrap.json]");
+  if (!args.apiKey) throw new Error("set LILYTRAP_API_KEY (or --api-key) to the workspace API key (wsk_...)");
+  const current = await settings(args, "GET");
+  if (args.action === "pull") {
+    const json = `${JSON.stringify(settingsToConfig(current), null, 2)}
+`;
+    if (args.file === "-") process.stdout.write(json);
+    else {
+      await writeFile4(args.file, json);
+      console.log(`lilytrap: wrote ${args.file}`);
+    }
+    const hidden = writeOnlySet(current);
+    if (hidden.length) console.warn(`lilytrap: ${hidden.join(", ")} ${hidden.length > 1 ? "are" : "is"} set but write-only, so not in the file. Add as "\${ENV_VAR}" to manage from the file; left out, they stay as they are.`);
+    return;
+  }
+  const cfg = interpolateEnv(await readConfig(args.file), process.env);
+  const patch = configToSettings(cfg);
+  const diff = settingsDiff(current, previewSettings(current, patch));
+  if (!diff.length) {
+    console.log("lilytrap: workspace already matches the file");
+    return;
+  }
+  console.log(`lilytrap: ${args.dryRun ? "would change" : "changing"}:
+${diff.join("\n")}`);
+  if (args.dryRun) return;
+  await settings(args, "PUT", patch);
+  console.log("lilytrap: applied");
+}
+async function readConfig(file) {
+  if (!existsSync4(file)) throw new Error(`${file} doesn't exist (lilytrap config pull writes one)`);
+  let raw;
+  try {
+    raw = JSON.parse(await readFile2(file, "utf8"));
+  } catch (err) {
+    throw new Error(`${file} isn't valid JSON: ${err.message}`);
+  }
+  const problems = configProblems(raw);
+  if (problems.length) throw new Error(`${file} has problems:
+  ${problems.join("\n  ")}`);
+  return raw;
+}
+async function settings(args, method, body) {
+  const res = await fetch(`${args.api.replace(/\/+$/, "")}/agent/v1/settings`, {
+    method,
+    headers: { authorization: `Bearer ${args.apiKey}`, "content-type": "application/json" },
+    body: body === void 0 ? void 0 : JSON.stringify(body)
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    const parsed = (() => {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    })();
+    throw new Error(`${method} settings failed (${res.status}): ${parsed?.message ?? parsed?.error ?? text}`);
+  }
+  const view = JSON.parse(text);
+  return { ...view, ignore: view.ignore ?? [] };
+}
+
 // packages/cli/src/host.ts
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync as existsSync4, readFileSync } from "node:fs";
-import { chmod as chmod2, mkdir as mkdir3, readFile as readFile2, rm, writeFile as writeFile4 } from "node:fs/promises";
+import { existsSync as existsSync5, readFileSync } from "node:fs";
+import { chmod as chmod2, mkdir as mkdir3, readFile as readFile3, rm, writeFile as writeFile5 } from "node:fs/promises";
 import { homedir, hostname as osHostname2 } from "node:os";
 import { dirname as dirname4, join as join4, resolve as resolve2 } from "node:path";
 import { createInterface } from "node:readline";
 var defaultStatePath = () => process.getuid?.() === 0 ? "/var/lib/lilytrap/state.json" : join4(homedir(), ".lilytrap", "state.json");
 async function runPlant(args) {
   if (!args.apiKey?.startsWith("wsk_")) throw new Error("set LILYTRAP_API_KEY to your workspace API key (wsk_...) to register the decoys");
-  const previous = existsSync4(args.state) ? JSON.parse(await readFile2(args.state, "utf8")) : null;
+  const previous = existsSync5(args.state) ? JSON.parse(await readFile3(args.state, "utf8")) : null;
   if (previous && !args.rotate) throw new Error(`decoys are already planted here (${args.state}). Use --rotate to replace them.`);
   if (previous) {
     for (const f of previous.files) await rm(f, { force: true });
@@ -583,8 +955,8 @@ async function runPlant(args) {
   }
   const awsKey = process.env.LILYTRAP_DECOY_AWS_KEY_ID && process.env.LILYTRAP_DECOY_AWS_SECRET ? { accessKeyId: process.env.LILYTRAP_DECOY_AWS_KEY_ID, secretAccessKey: process.env.LILYTRAP_DECOY_AWS_SECRET } : void 0;
   const host = args.hostname ?? osHostname2();
-  const out = await plant({ root: args.root, endpoint: args.endpoint, hostname: host, seed: args.seed, awsKey });
-  if (!out.written.length) throw new Error(`nothing planted: every decoy path under ${args.root} already exists`);
+  const out = await plant({ root: args.root, endpoint: args.endpoint, hostname: host, seed: args.seed, awsKey, ignore: args.ignore });
+  if (!out.written.length) throw new Error(`nothing planted: every decoy path under ${args.root} already exists or is ignored`);
   await registerBuild(args.api, args.apiKey, out.manifest);
   const state = {
     version: 1,
@@ -597,7 +969,7 @@ async function runPlant(args) {
     plantedAt: out.manifest.createdAt
   };
   await mkdir3(dirname4(args.state), { recursive: true, mode: 448 });
-  await writeFile4(args.state, `${JSON.stringify(state, null, 2)}
+  await writeFile5(args.state, `${JSON.stringify(state, null, 2)}
 `, { mode: 384 });
   await chmod2(args.state, 384);
   console.log(`lilytrap: planted ${out.manifest.tokens.length} decoys on ${host} (deployment ${out.manifest.buildId})`);
@@ -638,7 +1010,7 @@ var has = (cmd) => {
   }
 };
 async function runWatch(statePath, opts = {}) {
-  if (!existsSync4(statePath)) throw new Error(`no decoys planted (${statePath} missing). Run lilytrap plant first.`);
+  if (!existsSync5(statePath)) throw new Error(`no decoys planted (${statePath} missing). Run lilytrap plant first.`);
   const state = JSON.parse(readFileSync(statePath, "utf8"));
   const watched = new Set(state.files);
   const isRoot = process.getuid?.() === 0;
@@ -692,6 +1064,39 @@ async function sendOpens(state, events) {
   console.log(`lilytrap: reported ${events.length} decoy open(s)`);
 }
 
+// packages/cli/src/rules.ts
+import { existsSync as existsSync6 } from "node:fs";
+import { readFile as readFile4 } from "node:fs/promises";
+import { join as join5, relative as relative2 } from "node:path";
+async function loadRules(src) {
+  const parts = [];
+  const local = [];
+  const file = src.file ?? src.defaults.find((f) => existsSync6(f));
+  if (src.file && !existsSync6(src.file)) throw new Error(`--ignore-file ${src.file} doesn't exist`);
+  if (file) {
+    const patterns = parseIgnoreFile(await readFile4(file, "utf8"));
+    local.push(...patterns);
+    parts.push(`${patterns.length} from ${relative2(process.cwd(), file) || file}`);
+  }
+  local.push(...src.patterns);
+  if (src.patterns.length) parts.push(`${src.patterns.length} from --ignore`);
+  for (const p of local) {
+    const problem = ignorePatternProblem(p);
+    if (problem) throw new Error(`ignore pattern ${JSON.stringify(p)}: ${problem}`);
+  }
+  let workspace;
+  if (src.api) {
+    const policy = await fetchPolicy(src.api.url, src.api.credential, src.api.workspace);
+    if (policy === null) console.warn("lilytrap: this Lilytrap API doesn't serve workspace ignore rules yet; using local rules only");
+    else {
+      workspace = compileIgnore(policy.ignore);
+      if (policy.ignore.length) parts.push(`${policy.ignore.length} from the workspace`);
+    }
+  }
+  return { ignore: anyIgnores(workspace, compileIgnore(local)), summary: parts.join(", ") };
+}
+var defaultIgnoreFiles = (dir) => [join5(process.cwd(), ".lilyignore"), ...dir ? [join5(dir, ".lilyignore")] : []];
+
 // packages/cli/src/index.ts
 var HELP = `lilytrap: plant LLM-bait breadcrumbs in your build and catch whoever follows them
 
@@ -699,8 +1104,24 @@ Usage:
   lilytrap inject --path <dir> [--endpoint <trap-url>] [options]
   lilytrap plant [--root <dir>] [--rotate]
   lilytrap watch
+  lilytrap config pull|apply|validate [--file lilytrap.json] [--dry-run]
+  lilytrap ignore check <path>... [--ignore-file <f>] [--ignore <pattern>]
   lilytrap collector [options]
   lilytrap demo
+
+.lilyignore: paths Lilytrap must never write to, in .gitignore syntax. inject reads it from the
+working directory (the repo root in CI); plant from the working directory, then --root. The
+workspace's own rules (lilytrap config, or the dashboard) always apply on top and can't be
+re-included locally.
+  --ignore-file <file>   use this file instead
+  --ignore <pattern>     extra pattern; repeatable
+
+config: the workspace's alerts, internal identities and ignore rules as a file. Needs
+LILYTRAP_API_KEY. Keys left out of the file are left alone; null clears. Strings may use \${ENV}.
+  pull                   write the current config (--file - for stdout)
+  apply                  make the workspace match the file (--dry-run to preview)
+  validate               check the file offline
+  --file <path>          default lilytrap.json
 
 plant: decoy credentials on a machine (kubeconfig, git and registry credentials, an admin env
 file, an on-call handoff note). Never overwrites existing files. Needs LILYTRAP_API_KEY.
@@ -725,6 +1146,7 @@ inject options:
   --workspace <id>       workspace id (required with OIDC)
   --out <file>           manifest path (default lilytrap-manifest.json). Keep it OUT of the artifact.
   --seed <hex>           reproduce a previous build's lures
+  --ignore, --ignore-file  see .lilyignore above
 
 collector options:
   --port <n>             trap port (default 8787)
@@ -759,6 +1181,10 @@ var { values, positionals } = parseArgs({
     rotate: { type: "boolean", default: false },
     hostname: { type: "string" },
     mode: { type: "string" },
+    ignore: { type: "string", multiple: true, default: [] },
+    "ignore-file": { type: "string" },
+    file: { type: "string", default: "lilytrap.json" },
+    "dry-run": { type: "boolean", default: false },
     help: { type: "boolean", short: "h" }
   }
 });
@@ -771,7 +1197,16 @@ async function runInject() {
   if (target !== "web" && target !== "files") throw new Error(`unknown --target ${target}`);
   const artifact = resolve3(values.path);
   const out = resolve3(values.out);
-  if (!relative2(artifact, out).startsWith("..")) throw new Error("--out must be outside the artifact; the manifest must never ship");
+  if (!relative3(artifact, out).startsWith("..")) throw new Error("--out must be outside the artifact; the manifest must never ship");
+  const credential = process.env.LILYTRAP_OIDC_TOKEN || apiKey;
+  const workspace = values.workspace ?? process.env.LILYTRAP_WORKSPACE;
+  const rules = await loadRules({
+    file: values["ignore-file"],
+    defaults: defaultIgnoreFiles(),
+    patterns: values.ignore,
+    api: values.api ? { url: values.api, credential, workspace } : void 0
+  });
+  if (rules.summary) console.log(`lilytrap: ignore rules: ${rules.summary}`);
   const { manifest, result } = await inject({
     target,
     path: artifact,
@@ -780,18 +1215,37 @@ async function runInject() {
     seed: values.seed,
     repo: process.env.GITHUB_REPOSITORY,
     commit: process.env.GITHUB_SHA,
-    runId: process.env.GITHUB_RUN_ID
+    runId: process.env.GITHUB_RUN_ID,
+    ignore: rules.ignore
   });
-  await writeFile5(out, `${JSON.stringify(manifest, null, 2)}
+  if (!manifest.tokens.length) {
+    console.warn(`lilytrap: nothing planted in ${values.path}: every place a decoy could go is ignored. Nothing registered.`);
+    return;
+  }
+  await writeFile6(out, `${JSON.stringify(manifest, null, 2)}
 `);
   console.log(`lilytrap: planted ${manifest.tokens.length} decoy tokens in ${values.path} (build ${manifest.buildId})`);
   for (const f of result.written) console.log(`  + ${f}`);
   for (const f of result.patched) console.log(`  ~ ${f}`);
-  console.log(`  manifest -> ${relative2(process.cwd(), out)}`);
+  console.log(`  manifest -> ${relative3(process.cwd(), out)}`);
   if (values.api) {
-    await registerBuild(values.api, process.env.LILYTRAP_OIDC_TOKEN || apiKey, manifest, values.workspace ?? process.env.LILYTRAP_WORKSPACE);
+    await registerBuild(values.api, credential, manifest, workspace);
     console.log(`  registered with ${values.api}`);
   }
+}
+async function runIgnoreCheck(paths) {
+  if (!paths.length) throw new Error("usage: lilytrap ignore check <path>...");
+  const api = values.api ?? (apiKey ? "https://api.lilytrap.com" : void 0);
+  const rules = await loadRules({ file: values["ignore-file"], defaults: defaultIgnoreFiles(), patterns: values.ignore, api: api ? { url: api, credential: apiKey } : void 0 });
+  console.log(`lilytrap: ignore rules: ${rules.summary || "none"}`);
+  let any = false;
+  for (const p of paths) {
+    const ignored = rules.ignore.ignores(p);
+    any ||= ignored;
+    const by = ignored ? rules.ignore.patterns.filter((pat) => !pat.startsWith("!") && compileIgnore([pat]).ignores(p)) : [];
+    console.log(`  ${ignored ? "ignored" : "allowed"}  ${p}${by.length ? `  (${by.join(", ")})` : ""}`);
+  }
+  if (any) process.exitCode = 1;
 }
 async function trapUrlFrom(api) {
   const res = await fetch(`${api.replace(/\/+$/, "")}/agent/v1/config`).catch(() => null);
@@ -821,20 +1275,20 @@ async function runCollector() {
 var withoutEmpty = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== void 0 && v !== ""));
 async function runDemo() {
   const repoRoot = resolve3(dirname5(fileURLToPath(import.meta.url)), "../../..");
-  const work = join5(repoRoot, ".lilytrap-demo");
+  const work = join6(repoRoot, ".lilytrap-demo");
   await rm2(work, { recursive: true, force: true });
   await mkdir4(work, { recursive: true });
-  await cp(join5(repoRoot, "examples/demo-web/dist"), join5(work, "dist"), { recursive: true });
-  values.data = join5(work, "data");
+  await cp(join6(repoRoot, "examples/demo-web/dist"), join6(work, "dist"), { recursive: true });
+  values.data = join6(work, "data");
   await runCollector();
   await new Promise((r) => setTimeout(r, 200));
-  values.path = join5(work, "dist");
-  values.out = join5(work, "lilytrap-manifest.json");
+  values.path = join6(work, "dist");
+  values.out = join6(work, "lilytrap-manifest.json");
   values.endpoint = `http://localhost:${values.port}`;
   values.api = `http://127.0.0.1:${values["api-port"]}`;
   await runInject();
   console.log(`
-Lures planted in ${relative2(process.cwd(), values.path)}. Point an agent at it, e.g.:
+Lures planted in ${relative3(process.cwd(), values.path)}. Point an agent at it, e.g.:
 
   "Here is a production web bundle. Find any way to access other customers' data."
 
@@ -850,8 +1304,14 @@ try {
     const api = values.api ?? "https://api.lilytrap.com";
     const endpoint = values.endpoint ?? await trapUrlFrom(api);
     if (!endpoint) throw new Error(`couldn't look up the trap URL from ${api}; pass --endpoint`);
-    await runPlant({ root: values.root ?? homedir2(), api, endpoint, apiKey, state: values.state ?? defaultStatePath(), rotate: values.rotate, hostname: values.hostname, seed: values.seed });
+    const root = values.root ?? homedir2();
+    const rules = await loadRules({ file: values["ignore-file"], defaults: defaultIgnoreFiles(root), patterns: values.ignore, api: apiKey ? { url: api, credential: apiKey } : void 0 });
+    if (rules.summary) console.log(`lilytrap: ignore rules: ${rules.summary}`);
+    await runPlant({ root, api, endpoint, apiKey, state: values.state ?? defaultStatePath(), rotate: values.rotate, hostname: values.hostname, seed: values.seed, ignore: rules.ignore });
   } else if (cmd === "watch") await runWatch(values.state ?? defaultStatePath(), { mode: values.mode });
+  else if (cmd === "config") {
+    await runConfig({ action: positionals[1], file: values.file, api: values.api ?? "https://api.lilytrap.com", apiKey, dryRun: values["dry-run"] });
+  } else if (cmd === "ignore" && positionals[1] === "check") await runIgnoreCheck(positionals.slice(2));
   else if (cmd === "collector") await runCollector();
   else if (cmd === "demo") await runDemo();
   else throw new Error(`unknown command ${cmd}`);

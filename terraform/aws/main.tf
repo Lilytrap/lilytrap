@@ -27,9 +27,21 @@ locals {
   region   = data.aws_region.current.region
   account  = data.aws_caller_identity.current.account_id
 
-  secret_name = "${var.name_prefix}/platform/admin-api"
-  param_name  = "/${var.name_prefix}/platform/admin-token"
-  object_key  = "terraform/${var.name_prefix}.tfstate.backup"
+  secret_name = coalesce(var.secret_name, "${var.name_prefix}/platform/admin-api")
+  param_name  = coalesce(var.ssm_parameter_name, "/${var.name_prefix}/platform/admin-token")
+  object_key  = coalesce(var.s3_key, "terraform/${var.name_prefix}.tfstate.backup")
+
+  # Where each decoy would go, as .lilyignore resource paths.
+  resource_paths = {
+    secret = "aws/${local.account}/${local.region}/secretsmanager/${local.secret_name}"
+    ssm    = "aws/${local.account}/${local.region}/ssm/${trimprefix(local.param_name, "/")}"
+    s3     = var.s3_bucket == null ? "" : "aws/${local.account}/s3/${var.s3_bucket}/${local.object_key}"
+    iam    = "aws/${local.account}/iam/users/${var.name_prefix}-break-glass-admin"
+  }
+  ignored    = data.http.policy.status_code == 200 ? jsondecode(data.http.policy.response_body).ignored : []
+  plant_ssm  = var.ssm_parameter && !contains(local.ignored, local.resource_paths.ssm)
+  plant_s3   = var.s3_bucket != null && !contains(local.ignored, local.resource_paths.s3)
+  plant_iam  = var.iam_key_decoy && !contains(local.ignored, local.resource_paths.iam)
 
   admin_path  = "/internal/platform-admin/${random_id.path.hex}/v1"
   admin_token = "adm_${random_password.token.result}"
@@ -45,11 +57,27 @@ locals {
       admin_token   = local.admin_token
       notes         = "Break-glass platform admin. Bearer auth. GET /clusters, /secrets/{name}. Rotate after the incident review."
     },
-    var.iam_key_decoy ? {
+    local.plant_iam ? {
       aws_access_key_id     = aws_iam_access_key.decoy[0].id
       aws_secret_access_key = aws_iam_access_key.decoy[0].secret
     } : {}
   )
+}
+
+# The workspace's ignore rules (and this module's `ignore`) decide which decoys are planted. Ignored
+# optional decoys are skipped; an ignored main secret stops the plan before anything is created.
+data "http" "policy" {
+  url             = "${local.api}/v1/policy/check"
+  method          = "POST"
+  request_headers = { authorization = "Bearer ${var.lilytrap_api_key}", "content-type" = "application/json" }
+  request_body    = jsonencode({ paths = compact(values(local.resource_paths)), extra = var.ignore })
+  lifecycle {
+    postcondition {
+      # 404: an API from before ignore rules; fine unless this module was given its own.
+      condition     = self.status_code == 200 || (self.status_code == 404 && length(var.ignore) == 0)
+      error_message = "Couldn't read the workspace's ignore rules from ${local.api} (HTTP ${self.status_code}): ${self.response_body}"
+    }
+  }
 }
 
 resource "random_id" "path" {
@@ -73,6 +101,12 @@ resource "aws_secretsmanager_secret" "decoy" {
   description             = "Platform admin API (break-glass)"
   recovery_window_in_days = 0
   tags                    = var.tags
+  lifecycle {
+    precondition {
+      condition     = !contains(local.ignored, local.resource_paths.secret)
+      error_message = "Lilytrap ignore rules exclude ${local.resource_paths.secret}. Set secret_name to a path they allow, or remove this module."
+    }
+  }
 }
 
 resource "aws_secretsmanager_secret_version" "decoy" {
@@ -81,7 +115,7 @@ resource "aws_secretsmanager_secret_version" "decoy" {
 }
 
 resource "aws_ssm_parameter" "decoy" {
-  count       = var.ssm_parameter ? 1 : 0
+  count       = local.plant_ssm ? 1 : 0
   name        = local.param_name
   description = "Platform admin token (break-glass)"
   type        = "SecureString"
@@ -90,7 +124,7 @@ resource "aws_ssm_parameter" "decoy" {
 }
 
 resource "aws_s3_object" "decoy" {
-  count        = var.s3_bucket == null ? 0 : 1
+  count        = local.plant_s3 ? 1 : 0
   bucket       = var.s3_bucket
   key          = local.object_key
   content_type = "application/json"
@@ -106,14 +140,14 @@ resource "aws_s3_object" "decoy" {
 }
 
 resource "aws_iam_user" "decoy" {
-  count = var.iam_key_decoy ? 1 : 0
+  count = local.plant_iam ? 1 : 0
   name  = "${var.name_prefix}-break-glass-admin"
   tags  = merge(var.tags, { purpose = "break-glass" })
 }
 
 # The decoy key can do nothing at all. Its only job is to show up in CloudTrail when someone tries.
 resource "aws_iam_user_policy" "decoy_deny_all" {
-  count = var.iam_key_decoy ? 1 : 0
+  count = local.plant_iam ? 1 : 0
   name  = "deny-all"
   user  = aws_iam_user.decoy[0].name
   policy = jsonencode({
@@ -123,15 +157,15 @@ resource "aws_iam_user_policy" "decoy_deny_all" {
 }
 
 resource "aws_iam_access_key" "decoy" {
-  count = var.iam_key_decoy ? 1 : 0
+  count = local.plant_iam ? 1 : 0
   user  = aws_iam_user.decoy[0].name
 }
 
 locals {
   secret_resources = concat(
     [aws_secretsmanager_secret.decoy.arn, "secretsmanager:${local.secret_name}"],
-    var.ssm_parameter ? ["ssm:${local.param_name}"] : [],
-    var.s3_bucket == null ? [] : ["s3:${var.s3_bucket}/${local.object_key}"],
+    local.plant_ssm ? ["ssm:${local.param_name}"] : [],
+    local.plant_s3 ? ["s3:${var.s3_bucket}/${local.object_key}"] : [],
   )
   tokens = concat(
     [{
@@ -142,11 +176,11 @@ locals {
       path       = "${local.admin_path}/clusters"
       method     = "GET"
       tells      = []
-      locations  = concat(["aws secretsmanager ${local.secret_name}"], var.ssm_parameter ? ["aws ssm ${local.param_name}"] : [], var.s3_bucket == null ? [] : ["s3://${var.s3_bucket}/${local.object_key}"])
+      locations  = concat(["aws secretsmanager ${local.secret_name}"], local.plant_ssm ? ["aws ssm ${local.param_name}"] : [], local.plant_s3 ? ["s3://${var.s3_bucket}/${local.object_key}"] : [])
       hop        = 1
       resources  = local.secret_resources
     }],
-    var.iam_key_decoy ? [{
+    local.plant_iam ? [{
       id   = "tok_${substr(sha256("${aws_iam_access_key.decoy[0].id}:id"), 0, 14)}"
       kit  = "aws-break-glass"
       kind = "header-key"

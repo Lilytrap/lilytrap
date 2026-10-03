@@ -27,6 +27,12 @@ inputs:
   api-key:
     description: Workspace API key, for when OIDC isn't available (e.g. self-hosted collector)
     required: false
+  ignore:
+    description: "Extra .lilyignore patterns (gitignore syntax), one per line: paths in `path` Lilytrap must never write to or patch. The workspace's own rules always apply too."
+    required: false
+  ignore-file:
+    description: "Ignore file to use instead of .lilyignore in the working directory."
+    required: false
 
 outputs:
   manifest:
@@ -49,6 +55,8 @@ runs:
         IN_ENDPOINT: ${{ inputs.endpoint }}
         IN_DENSITY: ${{ inputs.density }}
         IN_API: ${{ inputs.api }}
+        IN_IGNORE: ${{ inputs.ignore }}
+        IN_IGNORE_FILE: ${{ inputs.ignore-file }}
       run: |
         manifest="$RUNNER_TEMP/lilytrap-manifest.json"
         if [ -n "$LILYTRAP_WORKSPACE" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
@@ -59,6 +67,11 @@ runs:
         args=(inject --target "$IN_TARGET" --path "$IN_PATH" --density "$IN_DENSITY" --out "$manifest")
         if [ -n "$IN_ENDPOINT" ]; then args+=(--endpoint "$IN_ENDPOINT"); fi
         if [ -n "$IN_API" ]; then args+=(--api "$IN_API"); fi
+        if [ -n "$IN_IGNORE_FILE" ]; then args+=(--ignore-file "$IN_IGNORE_FILE"); fi
+        while IFS= read -r pattern; do
+          pattern="${pattern%$'\r'}"
+          case "$pattern" in ''|'#'*) ;; *) args+=("--ignore=$pattern") ;; esac
+        done <<< "$IN_IGNORE"
         # Published releases ship one bundled file; the source tree runs the TypeScript directly.
         cli="$GITHUB_ACTION_PATH/dist/lilytrap.mjs"
         [ -f "$cli" ] || cli="$GITHUB_ACTION_PATH/packages/cli/src/index.ts"

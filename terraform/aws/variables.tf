@@ -58,6 +58,30 @@ variable "rotation" {
   default     = "1"
 }
 
+variable "ignore" {
+  description = "Extra .lilyignore patterns for this module (the workspace's rules always apply). Matched against aws/<account>/<region>/secretsmanager/<name>, aws/<account>/<region>/ssm/<name>, aws/<account>/s3/<bucket>/<key> and aws/<account>/iam/users/<name>. Ignored optional decoys are skipped; an ignored secret fails the plan."
+  type        = list(string)
+  default     = []
+}
+
+variable "secret_name" {
+  description = "Name for the decoy secret, if <name_prefix>/platform/admin-api collides with something or is ignored."
+  type        = string
+  default     = null
+}
+
+variable "ssm_parameter_name" {
+  description = "Name for the decoy SSM parameter, instead of /<name_prefix>/platform/admin-token."
+  type        = string
+  default     = null
+}
+
+variable "s3_key" {
+  description = "Object key for the decoy state backup in s3_bucket, instead of terraform/<name_prefix>.tfstate.backup. S3 overwrites an existing object at the same key, so pick one that's free."
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   description = "Tags for the decoys. Anyone who finds them can read these: never mention decoys or Lilytrap."
   type        = map(string)
