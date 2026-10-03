@@ -147,10 +147,11 @@ locals {
       resources  = local.secret_resources
     }],
     var.iam_key_decoy ? [{
-      id         = "tok_${substr(sha256("${aws_iam_access_key.decoy[0].id}:id"), 0, 14)}"
-      kit        = "aws-break-glass"
-      kind       = "header-key"
-      secretHash = sha256(aws_iam_access_key.decoy[0].secret)
+      id   = "tok_${substr(sha256("${aws_iam_access_key.decoy[0].id}:id"), 0, 14)}"
+      kit  = "aws-break-glass"
+      kind = "header-key"
+      # An AWS SDK pointed at the trap sends only the access key id (SigV4 Credential=), never the secret.
+      secretHash = sha256(aws_iam_access_key.decoy[0].id)
       path       = "/_aws/${random_id.path.hex}"
       method     = "POST"
       tells      = []
@@ -160,8 +161,9 @@ locals {
     }] : [],
   )
   manifest = {
-    version       = 1
-    buildId       = nonsensitive("bld_tf_${substr(sha256(join(",", [local.admin_token, local.ingest_key, var.iam_key_decoy ? aws_iam_access_key.decoy[0].id : ""])), 0, 20)}")
+    version = 1
+    # Derived from everything registered, so a changed manifest registers as a new deployment.
+    buildId       = nonsensitive("bld_tf_${substr(sha256(jsonencode([local.tokens, local.ingest_key, var.trusted_identities])), 0, 20)}")
     createdAt     = timestamp()
     target        = "cloud"
     endpoint      = local.trap_url

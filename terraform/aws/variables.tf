@@ -59,6 +59,7 @@ variable "rotation" {
 }
 
 variable "tags" {
-  type    = map(string)
-  default = {}
+  description = "Tags for the decoys. Anyone who finds them can read these: never mention decoys or Lilytrap."
+  type        = map(string)
+  default     = {}
 }

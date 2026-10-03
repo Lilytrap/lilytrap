@@ -164,7 +164,8 @@ users:
     const aws = token({
       kit: "aws-break-glass",
       kind: "header-key",
-      secretHash: sha256(opts.awsKey.secretAccessKey),
+      // An AWS SDK pointed at the trap sends only the access key id (SigV4 Credential=), never the secret.
+      secretHash: sha256(opts.awsKey.accessKeyId),
       path: `/_aws/${randomString(rng, 12)}`,
       method: "POST",
       tells: [],
