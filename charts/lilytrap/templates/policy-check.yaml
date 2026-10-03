@@ -1,0 +1,88 @@
+{{- /*
+Before any decoy Secret is created or changed, ask Lilytrap whether the workspace's ignore rules
+(plus this release's `ignore`) exclude any of them. A chart can't call an API while rendering, so
+an ignored decoy can't be skipped: the hook fails and the release stops. Pre-install hooks run
+before the chart's other resources, so nothing is planted.
+*/}}
+{{- if .Values.policyCheck.enabled }}
+{{- $paths := list }}
+{{- range $ns := splitList "," (include "lilytrap.namespaces" .) }}
+{{- if include "lilytrap.adminOn" $ }}{{ $paths = append $paths (printf "k8s/%s/secrets/%s" $ns (include "lilytrap.adminName" $)) }}{{ end }}
+{{- if include "lilytrap.registryOn" $ }}{{ $paths = append $paths (printf "k8s/%s/secrets/%s" $ns (include "lilytrap.registryName" $)) }}{{ end }}
+{{- end }}
+{{- $check := dict "paths" $paths "extra" (.Values.ignore | default list) }}
+{{- if .Values.lilytrap.apiKey }}
+---
+# The release's own API key Secret doesn't exist yet when pre-install hooks run.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-lilytrap-check-key
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+type: Opaque
+stringData:
+  LILYTRAP_API_KEY: {{ .Values.lilytrap.apiKey | quote }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-lilytrap-policy-check
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    # Kept on failure so `kubectl logs job/<release>-lilytrap-policy-check` explains it.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: check
+          image: {{ .Values.registration.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          env:
+            - name: LILYTRAP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.lilytrap.existingSecret | default (printf "%s-lilytrap-check-key" .Release.Name) }}
+                  key: LILYTRAP_API_KEY
+            - name: CHECK
+              value: {{ $check | toJson | quote }}
+            - name: LOCAL_RULES
+              value: {{ len (.Values.ignore | default list) | quote }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              out=$(curl -sS --retry 3 -X POST {{ trimSuffix "/" .Values.lilytrap.apiUrl }}/v1/policy/check \
+                -H "authorization: Bearer $LILYTRAP_API_KEY" -H "content-type: application/json" \
+                --data "$CHECK" -w ' %{http_code}') || { echo "lilytrap: couldn't reach the API"; exit 1; }
+              code=${out##* }
+              body=${out% *}
+              if [ "$code" = 404 ] && [ "$LOCAL_RULES" = 0 ]; then
+                echo "lilytrap: this API predates ignore rules; skipping the check"; exit 0
+              fi
+              if [ "$code" != 200 ]; then echo "lilytrap: policy check failed (HTTP $code): $body"; exit 1; fi
+              case "$body" in
+                *'"ignored":[]'*) echo "lilytrap: no decoy is ignored"; exit 0 ;;
+              esac
+              echo "lilytrap: ignore rules exclude decoys this release would plant: $body"
+              echo "Turn them off (decoys.<kind>.enabled=false), rename them (decoys.<kind>.name), or change namespaces."
+              exit 1
+          resources: {{ toJson .Values.registration.resources }}
+{{- end }}

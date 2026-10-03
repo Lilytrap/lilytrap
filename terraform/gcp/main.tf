@@ -46,6 +46,16 @@ variable "labels" {
   type    = map(string)
   default = {}
 }
+variable "secret_id" {
+  description = "Secret id for the decoy, if <name_prefix>-platform-admin-api collides with something or is ignored."
+  type        = string
+  default     = null
+}
+variable "ignore" {
+  description = "Extra .lilyignore patterns for this module (the workspace's rules always apply), matched against gcp/<project>/secretmanager/<secret_id>. An ignored decoy fails the plan before anything is created."
+  type        = list(string)
+  default     = []
+}
 
 data "google_client_openid_userinfo" "me" {}
 
@@ -62,10 +72,27 @@ data "http" "config" {
 locals {
   api         = trimsuffix(var.lilytrap_api_url, "/")
   trap_url    = trimsuffix(jsondecode(data.http.config.response_body).trapUrl, "/")
-  secret_id   = "${var.name_prefix}-platform-admin-api"
+  secret_id   = coalesce(var.secret_id, "${var.name_prefix}-platform-admin-api")
+  secret_path = "gcp/${var.project}/secretmanager/${local.secret_id}"
+  ignored     = data.http.policy.status_code == 200 ? jsondecode(data.http.policy.response_body).ignored : []
   admin_path  = "/internal/platform-admin/${random_id.path.hex}/v1"
   admin_token = "adm_${random_password.token.result}"
   ingest_key  = "lti_${random_password.ingest.result}"
+}
+
+# The workspace's ignore rules (and this module's `ignore`) are checked before anything is created.
+data "http" "policy" {
+  url             = "${local.api}/v1/policy/check"
+  method          = "POST"
+  request_headers = { authorization = "Bearer ${var.lilytrap_api_key}", "content-type" = "application/json" }
+  request_body    = jsonencode({ paths = [local.secret_path], extra = var.ignore })
+  lifecycle {
+    postcondition {
+      # 404: an API from before ignore rules; fine unless this module was given its own.
+      condition     = self.status_code == 200 || (self.status_code == 404 && length(var.ignore) == 0)
+      error_message = "Couldn't read the workspace's ignore rules from ${local.api} (HTTP ${self.status_code}): ${self.response_body}"
+    }
+  }
 }
 
 resource "random_id" "path" {
@@ -90,6 +117,12 @@ resource "google_secret_manager_secret" "decoy" {
   labels    = merge(var.labels, { purpose = "break-glass" })
   replication {
     auto {}
+  }
+  lifecycle {
+    precondition {
+      condition     = !contains(local.ignored, local.secret_path)
+      error_message = "Lilytrap ignore rules exclude ${local.secret_path}. Set secret_id to a name they allow, or remove this module."
+    }
   }
 }
 

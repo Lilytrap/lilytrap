@@ -13,6 +13,23 @@ namePrefix: prod
 # Namespaces to plant decoys in. Empty means the release namespace.
 namespaces: []
 
+# Which decoy Secrets to plant in each namespace, and their names (default <namePrefix>-platform-admin
+# and <namePrefix>-registry-push). Rename one if it collides with a real Secret or an ignore rule.
+decoys:
+  adminToken:
+    enabled: true
+    name: ""
+  registry:
+    enabled: true
+    name: ""
+
+# .lilyignore patterns for this release (gitignore syntax), on top of the workspace's rules. They match
+# k8s/<namespace>/secrets/<name>. Before installing or upgrading, a hook Job checks every decoy Secret;
+# if any is ignored, the release stops before a decoy is created. Turn that decoy off or rename it.
+ignore: []
+policyCheck:
+  enabled: true
+
 # Change to rotate every decoy (e.g. --set rotate=$(date +%s)). Without a change, upgrades keep
 # the same values. GitOps tools that render without cluster access (Argo CD) can't read the
 # current values back, so pin them with tokens.* instead.

@@ -2,6 +2,12 @@
 {{- if .Values.namespaces }}{{ join "," .Values.namespaces }}{{ else }}{{ .Release.Namespace }}{{ end -}}
 {{- end -}}
 
+{{/* Decoy settings. `decoys` may be missing when upgrading with --reuse-values from an older chart. */}}
+{{- define "lilytrap.adminOn" -}}{{ if dig "adminToken" "enabled" true (.Values.decoys | default dict) }}true{{ end }}{{- end -}}
+{{- define "lilytrap.registryOn" -}}{{ if dig "registry" "enabled" true (.Values.decoys | default dict) }}true{{ end }}{{- end -}}
+{{- define "lilytrap.adminName" -}}{{ dig "adminToken" "name" "" (.Values.decoys | default dict) | default (printf "%s-platform-admin" .Values.namePrefix) }}{{- end -}}
+{{- define "lilytrap.registryName" -}}{{ dig "registry" "name" "" (.Values.decoys | default dict) | default (printf "%s-registry-push" .Values.namePrefix) }}{{- end -}}
+
 {{- define "lilytrap.trapHost" -}}
 {{- regexReplaceAll "^https?://([^/]+).*$" .Values.lilytrap.trapUrl "${1}" -}}
 {{- end -}}
@@ -14,8 +20,8 @@ Decoy values, stable across upgrades: pinned tokens.* first, then what's already
 {{- $root := . -}}
 {{- $out := dict -}}
 {{- range $ns := splitList "," (include "lilytrap.namespaces" $root) -}}
-{{- $admin := printf "%s-platform-admin" $root.Values.namePrefix -}}
-{{- $reg := printf "%s-registry-push" $root.Values.namePrefix -}}
+{{- $admin := include "lilytrap.adminName" $root -}}
+{{- $reg := include "lilytrap.registryName" $root -}}
 {{- $existing := lookup "v1" "Secret" $ns $admin -}}
 {{- $existingReg := lookup "v1" "Secret" $ns $reg -}}
 {{- $sameRotation := and $existing (eq (index ($existing.metadata.annotations | default dict) "platform.ops/rotation" | default "") (toString $root.Values.rotate)) -}}
@@ -25,7 +31,8 @@ Decoy values, stable across upgrades: pinned tokens.* first, then what's already
 {{- if $sameRotation -}}{{- $path = index $existing.metadata.annotations "platform.ops/admin-path" -}}{{- else -}}{{- $path = printf "/internal/platform-admin/%s/v1" (randAlphaNum 8 | lower) -}}{{- end -}}
 {{- $pass := $root.Values.tokens.registryPassword -}}
 {{- if not $pass -}}
-{{- if and $sameRotation $existingReg -}}
+{{- $sameRotationReg := and $existingReg (eq (index ($existingReg.metadata.annotations | default dict) "platform.ops/rotation" | default "") (toString $root.Values.rotate)) -}}
+{{- if $sameRotationReg -}}
 {{- $cfg := index $existingReg.data ".dockerconfigjson" | b64dec | fromJson -}}
 {{- range $h, $a := $cfg.auths -}}{{- $pass = $a.password -}}{{- end -}}
 {{- end -}}

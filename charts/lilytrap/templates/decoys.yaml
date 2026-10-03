@@ -1,7 +1,11 @@
+{{- if not (or (include "lilytrap.adminOn" .) (include "lilytrap.registryOn" .)) }}
+{{- fail "Both decoys are turned off (decoys.adminToken.enabled, decoys.registry.enabled); there is nothing to plant." }}
+{{- end }}
 {{- $decoys := include "lilytrap.decoysOnce" . | fromJson }}
 {{- $trap := trimSuffix "/" .Values.lilytrap.trapUrl }}
 {{- $host := include "lilytrap.trapHost" . }}
 {{- range $ns, $d := $decoys }}
+{{- if include "lilytrap.adminOn" $ }}
 ---
 apiVersion: v1
 kind: Secret
@@ -18,6 +22,8 @@ type: Opaque
 stringData:
   admin_api_url: {{ printf "%s%s" $trap $d.path | quote }}
   admin_token: {{ $d.token | quote }}
+{{- end }}
+{{- if include "lilytrap.registryOn" $ }}
 ---
 apiVersion: v1
 kind: Secret
@@ -31,4 +37,5 @@ metadata:
 type: kubernetes.io/dockerconfigjson
 stringData:
   .dockerconfigjson: {{ dict "auths" (dict $host (dict "username" "release" "password" $d.password "auth" (printf "release:%s" $d.password | b64enc))) | toJson | quote }}
+{{- end }}
 {{- end }}

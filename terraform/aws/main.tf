@@ -38,10 +38,10 @@ locals {
     s3     = var.s3_bucket == null ? "" : "aws/${local.account}/s3/${var.s3_bucket}/${local.object_key}"
     iam    = "aws/${local.account}/iam/users/${var.name_prefix}-break-glass-admin"
   }
-  ignored    = data.http.policy.status_code == 200 ? jsondecode(data.http.policy.response_body).ignored : []
-  plant_ssm  = var.ssm_parameter && !contains(local.ignored, local.resource_paths.ssm)
-  plant_s3   = var.s3_bucket != null && !contains(local.ignored, local.resource_paths.s3)
-  plant_iam  = var.iam_key_decoy && !contains(local.ignored, local.resource_paths.iam)
+  ignored   = data.http.policy.status_code == 200 ? jsondecode(data.http.policy.response_body).ignored : []
+  plant_ssm = var.ssm_parameter && !contains(local.ignored, local.resource_paths.ssm)
+  plant_s3  = var.s3_bucket != null && !contains(local.ignored, local.resource_paths.s3)
+  plant_iam = var.iam_key_decoy && !contains(local.ignored, local.resource_paths.iam)
 
   admin_path  = "/internal/platform-admin/${random_id.path.hex}/v1"
   admin_token = "adm_${random_password.token.result}"
