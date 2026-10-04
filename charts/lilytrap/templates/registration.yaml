@@ -14,7 +14,7 @@
 {{- $tokens = append $tokens (dict "id" (printf "tok_%s" (sha256sum (printf "%s:id" $d.password) | trunc 14)) "kit" "registry-auth" "kind" "basic-auth" "secretHash" (sha256sum $d.password) "path" (printf "/v2/_lilytrap/%s" (sha256sum $d.password | trunc 10)) "method" "GET" "tells" list "locations" (list (printf "secret %s/%s" $ns $d.registryName)) "hop" 2 "resources" (list (printf "k8s-secret:%s/%s" $ns $d.registryName))) }}
 {{- end }}
 {{- end }}
-{{- $manifest := dict "version" 1 "buildId" (printf "bld_helm_%s" (sha256sum $seed | trunc 20)) "createdAt" (now | date "2006-01-02T15:04:05Z07:00") "target" "k8s" "endpoint" (trimSuffix "/" .Values.lilytrap.trapUrl) "source" (dict "kind" "helm" "name" .Release.Name "location" (printf "namespaces %s" (include "lilytrap.namespaces" .))) "tokens" $tokens }}
+{{- $manifest := dict "version" 1 "buildId" (printf "bld_helm_%s" (sha256sum $seed | trunc 20)) "createdAt" (now | date "2006-01-02T15:04:05Z07:00") "target" "k8s" "endpoint" (trimSuffix "/" .Values.lilytrap.trapUrl) "source" (dict "kind" "helm" "name" .Release.Name "location" (printf "namespaces %s" (include "lilytrap.namespaces" .))) "deploymentKey" (include "lilytrap.deploymentKey" .) "tokens" $tokens }}
 ---
 apiVersion: v1
 kind: ConfigMap

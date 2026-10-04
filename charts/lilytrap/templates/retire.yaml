@@ -1,0 +1,50 @@
+{{- /*
+On `helm uninstall`, retire this release's deployment (every build of it) so the dashboard stops
+listing it and its decoys stop matching. Pre-delete hooks run while the release's API key Secret
+still exists. A failure only warns: it must never block an uninstall.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-lilytrap-retire
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: retire
+          image: {{ .Values.registration.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          env:
+            - name: LILYTRAP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.lilytrap.existingSecret | default (printf "%s-lilytrap-api-key" .Release.Name) }}
+                  key: LILYTRAP_API_KEY
+          command: ["sh", "-c"]
+          args:
+            - |
+              code=$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' -X DELETE \
+                "{{ trimSuffix "/" .Values.lilytrap.apiUrl }}/agent/v1/deployments?key={{ include "lilytrap.deploymentKey" . | urlquery }}" \
+                -H "authorization: Bearer $LILYTRAP_API_KEY") || code=unreachable
+              case "$code" in
+                200) echo "lilytrap: retired {{ include "lilytrap.deploymentKey" . }}" ;;
+                404) echo "lilytrap: nothing registered for {{ include "lilytrap.deploymentKey" . }}" ;;
+                *) echo "lilytrap: couldn't retire the deployment (HTTP $code); retire it from the dashboard" ;;
+              esac
+              exit 0
+          resources: {{ toJson .Values.registration.resources }}

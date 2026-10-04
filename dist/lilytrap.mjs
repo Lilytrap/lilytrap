@@ -806,6 +806,13 @@ function settingsDiff(current, next) {
   return out;
 }
 
+// packages/core/src/deployments.ts
+function ciDeploymentKey(repo, workflowRef, artifactPath) {
+  const workflow = workflowRef?.split("@")[0]?.replace(`${repo}/`, "") ?? "";
+  const path = artifactPath.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "") || ".";
+  return `ci:${repo}:${workflow}:${path}`;
+}
+
 // packages/core/src/index.ts
 async function inject(opts) {
   const plan = planLures({ endpoint: opts.endpoint, density: opts.density, seed: opts.seed });
@@ -819,6 +826,7 @@ async function inject(opts) {
     repo: opts.repo,
     commit: opts.commit,
     runId: opts.runId,
+    ...opts.deploymentKey ? { deploymentKey: opts.deploymentKey } : {},
     // Everything ignored: nothing was planted, so there is nothing to register.
     tokens: result.written.length ? plan.tokens.map((t) => ({ ...t, locations: [...result.locations] })) : []
   };
@@ -1015,6 +1023,11 @@ async function runWatch(statePath, opts = {}) {
   const watched = new Set(state.files);
   const isRoot = process.getuid?.() === 0;
   const mode = opts.mode ?? (isRoot && has("auditctl") ? "auditd" : has("inotifywait") ? "inotify" : "none");
+  const heartbeat = () => sendHeartbeat(state).catch((err) => console.error(`lilytrap: heartbeat failed: ${err.message}`));
+  if (mode === "auditd" || mode === "inotify") {
+    void heartbeat();
+    setInterval(heartbeat, HEARTBEAT_MS).unref();
+  }
   const pending = [];
   let timer = null;
   const report = (opens) => {
@@ -1052,6 +1065,15 @@ async function runWatch(statePath, opts = {}) {
     return;
   }
   throw new Error("no file watcher available: run as root with auditd (auditctl), or install inotify-tools. Using a decoy is still detected without a watcher.");
+}
+var HEARTBEAT_MS = 6 * 60 * 60 * 1e3;
+async function sendHeartbeat(state) {
+  const res = await fetch(`${state.api.replace(/\/+$/, "")}/ingest/v1/heartbeat`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-lilytrap-ingest-key": state.ingestKey },
+    body: "{}"
+  });
+  if (!res.ok) throw new Error(`heartbeat responded ${res.status}`);
 }
 async function sendOpens(state, events) {
   if (!events.length) return;
@@ -1134,6 +1156,7 @@ file, an on-call handoff note). Never overwrites existing files. Needs LILYTRAP_
   from the Terraform module as a break-glass profile.
 
 watch: report when a planted decoy file is opened (Linux: auditd as root, or inotify-tools).
+Also checks in every 6 hours, so the dashboard can tell when a host has gone away.
   --state <file>  --mode auditd|inotify
 
 inject options:
@@ -1147,6 +1170,8 @@ inject options:
   --out <file>           manifest path (default lilytrap-manifest.json). Keep it OUT of the artifact.
   --seed <hex>           reproduce a previous build's lures
   --ignore, --ignore-file  see .lilyignore above
+  --deployment <key>     what this is a build of, so builds group into one deployment
+                         (default in GitHub Actions: ci:<repo>:<workflow file>:<path>)
 
 collector options:
   --port <n>             trap port (default 8787)
@@ -1185,6 +1210,7 @@ var { values, positionals } = parseArgs({
     "ignore-file": { type: "string" },
     file: { type: "string", default: "lilytrap.json" },
     "dry-run": { type: "boolean", default: false },
+    deployment: { type: "string" },
     help: { type: "boolean", short: "h" }
   }
 });
@@ -1216,7 +1242,8 @@ async function runInject() {
     repo: process.env.GITHUB_REPOSITORY,
     commit: process.env.GITHUB_SHA,
     runId: process.env.GITHUB_RUN_ID,
-    ignore: rules.ignore
+    ignore: rules.ignore,
+    deploymentKey: values.deployment ?? (process.env.GITHUB_REPOSITORY ? ciDeploymentKey(process.env.GITHUB_REPOSITORY, process.env.GITHUB_WORKFLOW_REF, values.path) : void 0)
   });
   if (!manifest.tokens.length) {
     console.warn(`lilytrap: nothing planted in ${values.path}: every place a decoy could go is ignored. Nothing registered.`);

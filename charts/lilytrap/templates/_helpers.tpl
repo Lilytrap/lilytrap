@@ -8,6 +8,9 @@
 {{- define "lilytrap.adminName" -}}{{ dig "adminToken" "name" "" (.Values.decoys | default dict) | default (printf "%s-platform-admin" .Values.namePrefix) }}{{- end -}}
 {{- define "lilytrap.registryName" -}}{{ dig "registry" "name" "" (.Values.decoys | default dict) | default (printf "%s-registry-push" .Values.namePrefix) }}{{- end -}}
 
+{{/* One deployment per release, whatever its namespaces or values: upgrades are builds of it. */}}
+{{- define "lilytrap.deploymentKey" -}}helm:{{ .Release.Namespace }}/{{ .Release.Name }}{{- end -}}
+
 {{- define "lilytrap.trapHost" -}}
 {{- regexReplaceAll "^https?://([^/]+).*$" .Values.lilytrap.trapUrl "${1}" -}}
 {{- end -}}
