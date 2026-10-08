@@ -807,9 +807,17 @@ function settingsDiff(current, next) {
 }
 
 // packages/core/src/deployments.ts
-function ciDeploymentKey(repo, workflowRef, artifactPath) {
+function ciDeploymentKey(repo, workflowRef, artifactPath, roots = []) {
   const workflow = workflowRef?.split("@")[0]?.replace(`${repo}/`, "") ?? "";
-  const path = artifactPath.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "") || ".";
+  let path = artifactPath.replace(/\\/g, "/");
+  for (const raw of roots) {
+    const root = raw?.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (root && (path === root || path.startsWith(`${root}/`))) {
+      path = path.slice(root.length);
+      break;
+    }
+  }
+  path = path.replace(/^\.?\/+/, "").replace(/\/+$/, "") || ".";
   return `ci:${repo}:${workflow}:${path}`;
 }
 
@@ -1243,7 +1251,7 @@ async function runInject() {
     commit: process.env.GITHUB_SHA,
     runId: process.env.GITHUB_RUN_ID,
     ignore: rules.ignore,
-    deploymentKey: values.deployment ?? (process.env.GITHUB_REPOSITORY ? ciDeploymentKey(process.env.GITHUB_REPOSITORY, process.env.GITHUB_WORKFLOW_REF, values.path) : void 0)
+    deploymentKey: values.deployment ?? (process.env.GITHUB_REPOSITORY ? ciDeploymentKey(process.env.GITHUB_REPOSITORY, process.env.GITHUB_WORKFLOW_REF, values.path, [process.env.GITHUB_WORKSPACE, process.env.RUNNER_TEMP]) : void 0)
   });
   if (!manifest.tokens.length) {
     console.warn(`lilytrap: nothing planted in ${values.path}: every place a decoy could go is ignored. Nothing registered.`);
