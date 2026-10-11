@@ -34,6 +34,7 @@ The same detection for cloud accounts, clusters and machines:
 
 - `terraform/aws`, `terraform/gcp`, `terraform/azure`: a decoy break-glass secret (and on AWS, an optional permissionless access key), plus read detection from your own audit logs.
 - `terraform/aws/modules/waf-block`: IP sets and a narrow role so Lilytrap can push its block list into your AWS WAF.
+- `terraform/azure/modules/sentinel`: a Sentinel table and an app that can only write to it, for Lilytrap's event export.
 - `charts/lilytrap`: decoy Secrets in the namespaces you choose.
 - `dist/lilytrap.mjs plant`: decoy kubeconfig, git, registry and admin credentials on a machine. `watch` reports when they're opened.
 

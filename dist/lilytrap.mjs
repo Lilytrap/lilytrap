@@ -675,7 +675,21 @@ function configProblems(raw) {
     if (!obj(raw.alerts)) problems.push("alerts: must be an object");
     else {
       const a = raw.alerts;
-      keys(a, "alerts.", ["email", "slack", "webhook", "pagerduty", "github"]);
+      keys(a, "alerts.", ["email", "slack", "webhook", "pagerduty", "github", "splunk", "sentinel"]);
+      const siem = [
+        ["splunk", ["url", "token", "index"], ["url"]],
+        ["sentinel", ["tenantId", "clientId", "clientSecret", "endpoint", "dcrId", "stream"], ["tenantId", "clientId", "endpoint", "dcrId"]]
+      ];
+      for (const [name, fields, required] of siem) {
+        const v = a[name];
+        if (v === void 0 || v === null) continue;
+        if (!obj(v)) problems.push(`alerts.${name}: must be an object or null`);
+        else {
+          keys(v, `alerts.${name}.`, [...fields]);
+          for (const f of fields) if (v[f] !== void 0 && typeof v[f] !== "string") problems.push(`alerts.${name}.${f}: must be a string`);
+          for (const f of required) if (v[f] === void 0) problems.push(`alerts.${name}.${f}: required`);
+        }
+      }
       str(a.email, "alerts.email");
       str(a.slack, "alerts.slack");
       str(a.pagerduty, "alerts.pagerduty");
@@ -777,6 +791,8 @@ function configToSettings(cfg) {
       set("githubToken", a.github.token);
     }
   }
+  if (a?.splunk !== void 0) s.splunk = a.splunk;
+  if (a?.sentinel !== void 0) s.sentinel = a.sentinel;
   if (cfg.internalIdentities !== void 0) s.internalIdentities = cfg.internalIdentities;
   if (cfg.ignore !== void 0) s.ignore = cfg.ignore;
   if (cfg.respond?.blocklist !== void 0) s.blocklist = cfg.respond.blocklist ?? {};
@@ -792,7 +808,9 @@ function settingsToConfig(view) {
       slack: view.slackWebhook,
       // null would clear the write-only half too, so only when nothing is stored.
       webhook: view.webhookUrl || view.webhookSecretSet ? { url: view.webhookUrl } : null,
-      github: view.githubRepo || view.githubTokenSet ? { repo: view.githubRepo } : null
+      github: view.githubRepo || view.githubTokenSet ? { repo: view.githubRepo } : null,
+      splunk: view.splunk ? { url: view.splunk.url, ...view.splunk.index ? { index: view.splunk.index } : {} } : null,
+      sentinel: view.sentinel ? { tenantId: view.sentinel.tenantId, clientId: view.sentinel.clientId, endpoint: view.sentinel.endpoint, dcrId: view.sentinel.dcrId, stream: view.sentinel.stream } : null
     },
     internalIdentities: view.internalIdentities,
     ignore: view.ignore,
@@ -803,7 +821,9 @@ function writeOnlySet(view) {
   return [
     view.webhookSecretSet ? "alerts.webhook.secret" : null,
     view.pagerdutySet ? "alerts.pagerduty" : null,
-    view.githubTokenSet ? "alerts.github.token" : null
+    view.githubTokenSet ? "alerts.github.token" : null,
+    view.splunk?.tokenSet ? "alerts.splunk.token" : null,
+    view.sentinel?.secretSet ? "alerts.sentinel.clientSecret" : null
   ].filter((x) => x !== null);
 }
 function previewSettings(view, patch) {
@@ -819,6 +839,13 @@ function previewSettings(view, patch) {
   next.githubTokenSet = flag(patch.githubToken, view.githubTokenSet);
   if (patch.internalIdentities) next.internalIdentities = [...new Set(patch.internalIdentities.map((e) => e.trim()).filter(Boolean))];
   if (patch.ignore) next.ignore = [...new Set(patch.ignore.map((e) => e.trim()).filter(Boolean))];
+  if (patch.splunk !== void 0) {
+    next.splunk = patch.splunk && patch.splunk.url ? { url: patch.splunk.url, index: patch.splunk.index ?? null, tokenSet: Boolean(patch.splunk.token) || Boolean(view.splunk?.tokenSet) } : null;
+  }
+  if (patch.sentinel !== void 0) {
+    const p = patch.sentinel;
+    next.sentinel = p && p.tenantId ? { tenantId: p.tenantId, clientId: p.clientId, endpoint: p.endpoint, dcrId: p.dcrId, stream: p.stream ?? "Custom-Lilytrap", secretSet: Boolean(p.clientSecret) || Boolean(view.sentinel?.secretSet) } : null;
+  }
   if (patch.awsWaf !== void 0) next.awsWaf = patch.awsWaf && patch.awsWaf.roleArn ? { roleArn: patch.awsWaf.roleArn.trim(), ipSetArns: patch.awsWaf.ipSetArns.map((a) => a.trim()) } : null;
   if (patch.blocklist) {
     const reset = !Object.keys(patch.blocklist).length;
@@ -847,7 +874,14 @@ function settingsDiff(current, next) {
     ["alerts.github.token", current.githubTokenSet, next.githubTokenSet],
     ["respond.blocklist.minSeverity", cb.minSeverity, nb.minSeverity],
     ["respond.blocklist.ttlHours", cb.ttlHours, nb.ttlHours],
-    ["respond.awsWaf.roleArn", current.awsWaf?.roleArn ?? null, next.awsWaf?.roleArn ?? null]
+    ["respond.awsWaf.roleArn", current.awsWaf?.roleArn ?? null, next.awsWaf?.roleArn ?? null],
+    ["alerts.splunk.url", current.splunk?.url ?? null, next.splunk?.url ?? null],
+    ["alerts.splunk.index", current.splunk?.index ?? null, next.splunk?.index ?? null],
+    ["alerts.splunk.token", Boolean(current.splunk?.tokenSet), Boolean(next.splunk?.tokenSet)],
+    ["alerts.sentinel.endpoint", current.sentinel?.endpoint ?? null, next.sentinel?.endpoint ?? null],
+    ["alerts.sentinel.dcrId", current.sentinel?.dcrId ?? null, next.sentinel?.dcrId ?? null],
+    ["alerts.sentinel.clientId", current.sentinel?.clientId ?? null, next.sentinel?.clientId ?? null],
+    ["alerts.sentinel.clientSecret", Boolean(current.sentinel?.secretSet), Boolean(next.sentinel?.secretSet)]
   ];
   for (const [label, a, b] of scalar) {
     if (a === b) continue;
