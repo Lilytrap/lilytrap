@@ -646,6 +646,9 @@ Next step: finish the export migration, then rotate everything above.
 `;
 }
 
+// packages/core/src/api.ts
+var MAX_BLOCKLIST_TTL_HOURS = 720;
+
 // packages/core/src/config.ts
 var CONFIG_SCHEMA_URL = "https://lilytrap.com/schema/lilytrap.json";
 function configProblems(raw) {
@@ -666,7 +669,7 @@ function configProblems(raw) {
     return true;
   };
   if (!obj(raw)) return ["the file must hold a JSON object"];
-  keys(raw, "", ["$schema", "alerts", "internalIdentities", "ignore"]);
+  keys(raw, "", ["$schema", "alerts", "internalIdentities", "ignore", "respond"]);
   str(raw.$schema, "$schema");
   if (raw.alerts !== void 0) {
     if (!obj(raw.alerts)) problems.push("alerts: must be an object");
@@ -688,6 +691,38 @@ function configProblems(raw) {
     }
   }
   strList(raw.internalIdentities, "internalIdentities");
+  if (raw.respond !== void 0) {
+    if (!obj(raw.respond)) problems.push("respond: must be an object");
+    else {
+      keys(raw.respond, "respond.", ["blocklist", "awsWaf"]);
+      const w = raw.respond.awsWaf;
+      if (w !== void 0 && w !== null) {
+        if (!obj(w)) problems.push("respond.awsWaf: must be an object or null");
+        else {
+          keys(w, "respond.awsWaf.", ["roleArn", "ipSets"]);
+          if (typeof w.roleArn !== "string") problems.push("respond.awsWaf.roleArn: must be a string");
+          if (strList(w.ipSets, "respond.awsWaf.ipSets")) {
+            const n = w.ipSets.length;
+            if (n < 1 || n > 4) problems.push("respond.awsWaf.ipSets: 1 to 4 IP set ARNs");
+          } else if (w.ipSets === void 0) problems.push("respond.awsWaf.ipSets: required");
+        }
+      }
+      const b = raw.respond.blocklist;
+      if (b !== void 0 && b !== null) {
+        if (!obj(b)) problems.push("respond.blocklist: must be an object or null");
+        else {
+          keys(b, "respond.blocklist.", ["minSeverity", "ttlHours", "allow"]);
+          if (b.minSeverity !== void 0 && !["low", "medium", "high", "critical"].includes(b.minSeverity)) {
+            problems.push("respond.blocklist.minSeverity: must be low, medium, high or critical");
+          }
+          if (b.ttlHours !== void 0 && (!Number.isInteger(b.ttlHours) || b.ttlHours < 1 || b.ttlHours > MAX_BLOCKLIST_TTL_HOURS)) {
+            problems.push(`respond.blocklist.ttlHours: must be a whole number from 1 to ${MAX_BLOCKLIST_TTL_HOURS}`);
+          }
+          strList(b.allow, "respond.blocklist.allow");
+        }
+      }
+    }
+  }
   if (strList(raw.ignore, "ignore")) {
     const list = raw.ignore;
     if (list.length > MAX_IGNORE_PATTERNS) problems.push(`ignore: at most ${MAX_IGNORE_PATTERNS} patterns`);
@@ -744,6 +779,9 @@ function configToSettings(cfg) {
   }
   if (cfg.internalIdentities !== void 0) s.internalIdentities = cfg.internalIdentities;
   if (cfg.ignore !== void 0) s.ignore = cfg.ignore;
+  if (cfg.respond?.blocklist !== void 0) s.blocklist = cfg.respond.blocklist ?? {};
+  const waf = cfg.respond?.awsWaf;
+  if (waf !== void 0) s.awsWaf = waf === null ? null : { roleArn: waf.roleArn, ipSetArns: waf.ipSets };
   return s;
 }
 function settingsToConfig(view) {
@@ -757,7 +795,8 @@ function settingsToConfig(view) {
       github: view.githubRepo || view.githubTokenSet ? { repo: view.githubRepo } : null
     },
     internalIdentities: view.internalIdentities,
-    ignore: view.ignore
+    ignore: view.ignore,
+    respond: { blocklist: view.blocklist, awsWaf: view.awsWaf ? { roleArn: view.awsWaf.roleArn, ipSets: view.awsWaf.ipSetArns } : null }
   };
 }
 function writeOnlySet(view) {
@@ -780,10 +819,23 @@ function previewSettings(view, patch) {
   next.githubTokenSet = flag(patch.githubToken, view.githubTokenSet);
   if (patch.internalIdentities) next.internalIdentities = [...new Set(patch.internalIdentities.map((e) => e.trim()).filter(Boolean))];
   if (patch.ignore) next.ignore = [...new Set(patch.ignore.map((e) => e.trim()).filter(Boolean))];
+  if (patch.awsWaf !== void 0) next.awsWaf = patch.awsWaf && patch.awsWaf.roleArn ? { roleArn: patch.awsWaf.roleArn.trim(), ipSetArns: patch.awsWaf.ipSetArns.map((a) => a.trim()) } : null;
+  if (patch.blocklist) {
+    const reset = !Object.keys(patch.blocklist).length;
+    const cur = reset || !view.blocklist ? { minSeverity: "high", ttlHours: 24, allow: [] } : view.blocklist;
+    next.blocklist = {
+      minSeverity: patch.blocklist.minSeverity ?? cur.minSeverity,
+      ttlHours: patch.blocklist.ttlHours ?? cur.ttlHours,
+      allow: patch.blocklist.allow ? [...new Set(patch.blocklist.allow.map((e) => e.trim()).filter(Boolean))] : cur.allow
+    };
+  }
   return next;
 }
 function settingsDiff(current, next) {
   const out = [];
+  const noBlocklist = { minSeverity: "high", ttlHours: 24, allow: [] };
+  const cb = current.blocklist ?? noBlocklist;
+  const nb = next.blocklist ?? noBlocklist;
   const show = (v) => v === null || v === void 0 || v === "" ? "(none)" : JSON.stringify(v);
   const scalar = [
     ["alerts.email", current.alertEmail, next.alertEmail],
@@ -792,14 +844,22 @@ function settingsDiff(current, next) {
     ["alerts.webhook.secret", current.webhookSecretSet, next.webhookSecretSet],
     ["alerts.pagerduty", current.pagerdutySet, next.pagerdutySet],
     ["alerts.github.repo", current.githubRepo, next.githubRepo],
-    ["alerts.github.token", current.githubTokenSet, next.githubTokenSet]
+    ["alerts.github.token", current.githubTokenSet, next.githubTokenSet],
+    ["respond.blocklist.minSeverity", cb.minSeverity, nb.minSeverity],
+    ["respond.blocklist.ttlHours", cb.ttlHours, nb.ttlHours],
+    ["respond.awsWaf.roleArn", current.awsWaf?.roleArn ?? null, next.awsWaf?.roleArn ?? null]
   ];
   for (const [label, a, b] of scalar) {
     if (a === b) continue;
     if (typeof a === "boolean") out.push(`  ${label}: ${a ? "set" : "(none)"} -> ${b ? "set" : "(none)"}`);
     else out.push(`  ${label}: ${show(a)} -> ${show(b)}`);
   }
-  for (const [label, a, b] of [["internalIdentities", current.internalIdentities, next.internalIdentities], ["ignore", current.ignore, next.ignore]]) {
+  for (const [label, a, b] of [
+    ["internalIdentities", current.internalIdentities, next.internalIdentities],
+    ["ignore", current.ignore, next.ignore],
+    ["respond.blocklist.allow", cb.allow, nb.allow],
+    ["respond.awsWaf.ipSets", current.awsWaf?.ipSetArns ?? [], next.awsWaf?.ipSetArns ?? []]
+  ]) {
     for (const x of b) if (!a.includes(x)) out.push(`  ${label}: + ${x}`);
     for (const x of a) if (!b.includes(x)) out.push(`  ${label}: - ${x}`);
   }
