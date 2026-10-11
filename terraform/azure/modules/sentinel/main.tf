@@ -155,19 +155,23 @@ resource "azurerm_role_assignment" "publisher" {
 }
 
 output "endpoint" {
-  value = azurerm_monitor_data_collection_endpoint.lilytrap.logs_ingestion_endpoint
+  description = "Data collection endpoint logs ingestion URL."
+  value       = azurerm_monitor_data_collection_endpoint.lilytrap.logs_ingestion_endpoint
 }
 
 output "dcr_id" {
-  value = azurerm_monitor_data_collection_rule.lilytrap.immutable_id
+  description = "Immutable id of the data collection rule."
+  value       = azurerm_monitor_data_collection_rule.lilytrap.immutable_id
 }
 
 output "client_id" {
-  value = azuread_application.lilytrap.client_id
+  description = "Client id of the Entra app Lilytrap sends with."
+  value       = azuread_application.lilytrap.client_id
 }
 
 output "tenant_id" {
-  value = data.azuread_client_config.current.tenant_id
+  description = "Entra tenant id."
+  value       = data.azuread_client_config.current.tenant_id
 }
 
 output "lilytrap_config" {

@@ -24,6 +24,7 @@ var init_collector = __esm({
 });
 
 // packages/cli/src/index.ts
+import { execFileSync as execFileSync2 } from "node:child_process";
 import { cp, mkdir as mkdir4, rm as rm2, writeFile as writeFile6 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname5, join as join6, relative as relative3, resolve as resolve3 } from "node:path";
@@ -951,22 +952,36 @@ async function plant(opts) {
   };
   return { manifest, written: result.written, files: result.absolute, ingestKey };
 }
-async function fetchPolicy(apiUrl, credential, workspace) {
+async function fetchPolicy(apiUrl, credential, workspace, deployment) {
   const headers = {};
   if (credential) headers.authorization = `Bearer ${credential}`;
   if (workspace) headers["x-lilytrap-workspace"] = workspace;
-  const res = await fetch(`${apiUrl.replace(/\/+$/, "")}/v1/policy`, { headers });
+  const query = deployment ? `?deployment=${encodeURIComponent(deployment)}` : "";
+  const res = await fetch(`${apiUrl.replace(/\/+$/, "")}/v1/policy${query}`, { headers });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`reading the workspace's ignore rules failed: ${res.status} ${await res.text()}`);
   const body = await res.json();
-  return { ignore: Array.isArray(body.ignore) ? body.ignore.filter((p) => typeof p === "string") : [] };
+  return {
+    ignore: Array.isArray(body.ignore) ? body.ignore.filter((p) => typeof p === "string") : [],
+    ...body.plan && typeof body.plan.allowed === "boolean" ? { plan: body.plan } : {}
+  };
 }
 async function registerBuild(apiUrl, credential, manifest, workspace) {
   const headers = { "content-type": "application/json" };
   if (credential) headers.authorization = `Bearer ${credential}`;
   if (workspace) headers["x-lilytrap-workspace"] = workspace;
   const res = await fetch(`${apiUrl.replace(/\/+$/, "")}/v1/builds`, { method: "POST", headers, body: JSON.stringify(manifest) });
-  if (!res.ok) throw new Error(`registering build failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    const message = (() => {
+      try {
+        return JSON.parse(text).message;
+      } catch {
+        return void 0;
+      }
+    })();
+    throw new Error(`registering build failed: ${res.status} ${message ?? text}`);
+  }
 }
 
 // packages/cli/src/config.ts
@@ -1209,15 +1224,17 @@ async function loadRules(src) {
     if (problem) throw new Error(`ignore pattern ${JSON.stringify(p)}: ${problem}`);
   }
   let workspace;
+  let plan;
   if (src.api) {
-    const policy = await fetchPolicy(src.api.url, src.api.credential, src.api.workspace);
+    const policy = await fetchPolicy(src.api.url, src.api.credential, src.api.workspace, src.api.deployment);
+    plan = policy?.plan;
     if (policy === null) console.warn("lilytrap: this Lilytrap API doesn't serve workspace ignore rules yet; using local rules only");
     else {
       workspace = compileIgnore(policy.ignore);
       if (policy.ignore.length) parts.push(`${policy.ignore.length} from the workspace`);
     }
   }
-  return { ignore: anyIgnores(workspace, compileIgnore(local)), summary: parts.join(", ") };
+  return { ignore: anyIgnores(workspace, compileIgnore(local)), summary: parts.join(", "), ...plan ? { plan } : {} };
 }
 var defaultIgnoreFiles = (dir) => [join5(process.cwd(), ".lilyignore"), ...dir ? [join5(dir, ".lilyignore")] : []];
 
@@ -1230,8 +1247,8 @@ Usage:
   lilytrap watch
   lilytrap config pull|apply|validate [--file lilytrap.json] [--dry-run]
   lilytrap ignore check <path>... [--ignore-file <f>] [--ignore <pattern>]
-  lilytrap collector [options]
-  lilytrap demo
+  lilytrap collector [options]      (source checkout only)
+  lilytrap demo                     (source checkout only)
 
 .lilyignore: paths Lilytrap must never write to, in .gitignore syntax. inject reads it from the
 working directory (the repo root in CI); plant from the working directory, then --root. The
@@ -1240,8 +1257,8 @@ re-included locally.
   --ignore-file <file>   use this file instead
   --ignore <pattern>     extra pattern; repeatable
 
-config: the workspace's alerts, internal identities and ignore rules as a file. Needs
-LILYTRAP_API_KEY. Keys left out of the file are left alone; null clears. Strings may use \${ENV}.
+config: the workspace's settings as a file: alerts, SIEM export, internal identities, ignore
+rules, the block list and AWS WAF. Needs LILYTRAP_API_KEY. Keys left out of the file are left alone; null clears. Strings may use \${ENV}.
   pull                   write the current config (--file - for stdout)
   apply                  make the workspace match the file (--dry-run to preview)
   validate               check the file offline
@@ -1273,7 +1290,8 @@ inject options:
   --seed <hex>           reproduce a previous build's lures
   --ignore, --ignore-file  see .lilyignore above
   --deployment <key>     what this is a build of, so builds group into one deployment
-                         (default in GitHub Actions: ci:<repo>:<workflow file>:<path>)
+                         (default: ci:<repo>:<workflow file>:<path>; the repo comes from the CI's
+                         variables or the git remote)
 
 collector options:
   --port <n>             trap port (default 8787)
@@ -1328,24 +1346,31 @@ async function runInject() {
   if (!relative3(artifact, out).startsWith("..")) throw new Error("--out must be outside the artifact; the manifest must never ship");
   const credential = process.env.LILYTRAP_OIDC_TOKEN || apiKey;
   const workspace = values.workspace ?? process.env.LILYTRAP_WORKSPACE;
+  const repo = ciRepo();
+  const deploymentKey = values.deployment ?? (repo ? ciDeploymentKey(repo, process.env.GITHUB_WORKFLOW_REF, values.path, [process.env.GITHUB_WORKSPACE, process.env.RUNNER_TEMP, process.env.CI_PROJECT_DIR, process.cwd()]) : void 0);
   const rules = await loadRules({
     file: values["ignore-file"],
     defaults: defaultIgnoreFiles(),
     patterns: values.ignore,
-    api: values.api ? { url: values.api, credential, workspace } : void 0
+    api: values.api ? { url: values.api, credential, workspace, deployment: deploymentKey } : void 0
   });
   if (rules.summary) console.log(`lilytrap: ignore rules: ${rules.summary}`);
+  if (rules.plan && !rules.plan.allowed) {
+    const text = `Lilytrap skipped this build: the workspace protects ${rules.plan.used} of ${rules.plan.limit} repos or environments on the ${rules.plan.name} plan. Upgrade in the dashboard under Settings, or retire a deployment you no longer use.`;
+    console.warn(process.env.GITHUB_ACTIONS ? `::warning title=Lilytrap plan limit::${text}` : `lilytrap: ${text}`);
+    return;
+  }
   const { manifest, result } = await inject({
     target,
     path: artifact,
     endpoint: values.endpoint,
     density: values.density,
     seed: values.seed,
-    repo: process.env.GITHUB_REPOSITORY,
+    repo,
     commit: process.env.GITHUB_SHA,
     runId: process.env.GITHUB_RUN_ID,
     ignore: rules.ignore,
-    deploymentKey: values.deployment ?? (process.env.GITHUB_REPOSITORY ? ciDeploymentKey(process.env.GITHUB_REPOSITORY, process.env.GITHUB_WORKFLOW_REF, values.path, [process.env.GITHUB_WORKSPACE, process.env.RUNNER_TEMP]) : void 0)
+    deploymentKey
   });
   if (!manifest.tokens.length) {
     console.warn(`lilytrap: nothing planted in ${values.path}: every place a decoy could go is ignored. Nothing registered.`);
@@ -1360,6 +1385,17 @@ async function runInject() {
   if (values.api) {
     await registerBuild(values.api, credential, manifest, workspace);
     console.log(`  registered with ${values.api}`);
+  }
+}
+function ciRepo() {
+  const env = process.env;
+  const named = env.GITHUB_REPOSITORY || env.CI_PROJECT_PATH || env.BITBUCKET_REPO_FULL_NAME || (env.CIRCLE_PROJECT_USERNAME && env.CIRCLE_PROJECT_REPONAME ? `${env.CIRCLE_PROJECT_USERNAME}/${env.CIRCLE_PROJECT_REPONAME}` : "");
+  if (named) return named;
+  try {
+    const url = execFileSync2("git", ["config", "--get", "remote.origin.url"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1];
+  } catch {
+    return void 0;
   }
 }
 async function runIgnoreCheck(paths) {

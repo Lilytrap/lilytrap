@@ -112,19 +112,23 @@ resource "aws_iam_role_policy" "lilytrap" {
 }
 
 output "role_arn" {
-  value = aws_iam_role.lilytrap.arn
+  description = "The role Lilytrap assumes. Goes in respond.awsWaf.roleArn."
+  value       = aws_iam_role.lilytrap.arn
 }
 
 output "ip_set_arns" {
-  value = local.ip_set_arns
+  description = "Every IP set this module created. Goes in respond.awsWaf.ipSets."
+  value       = local.ip_set_arns
 }
 
 output "ipv4_ip_set_arn" {
-  value = aws_wafv2_ip_set.v4.arn
+  description = "The IPv4 IP set."
+  value       = aws_wafv2_ip_set.v4.arn
 }
 
 output "ipv6_ip_set_arn" {
-  value = try(aws_wafv2_ip_set.v6[0].arn, null)
+  description = "The IPv6 IP set, or null when ipv6 is false."
+  value       = try(aws_wafv2_ip_set.v6[0].arn, null)
 }
 
 output "lilytrap_config" {

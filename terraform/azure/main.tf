@@ -269,5 +269,6 @@ data "http" "register" {
 }
 
 output "deployment_id" {
-  value = local.manifest.buildId
+  description = "Lilytrap deployment id for these decoys."
+  value       = local.manifest.buildId
 }

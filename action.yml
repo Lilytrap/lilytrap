@@ -25,7 +25,7 @@ inputs:
     description: Lilytrap control API URL to register the build with
     default: https://api.lilytrap.com
   api-key:
-    description: Workspace API key, for when OIDC isn't available (e.g. self-hosted collector)
+    description: Workspace API key, for runs without GitHub OIDC. Pass it from a secret.
     required: false
   ignore:
     description: "Extra .lilyignore patterns (gitignore syntax), one per line: paths in `path` Lilytrap must never write to or patch. The workspace's own rules always apply too."

@@ -4,7 +4,8 @@ output "deployment_id" {
 }
 
 output "decoy_secret_arn" {
-  value = aws_secretsmanager_secret.decoy.arn
+  description = "ARN of the decoy Secrets Manager secret."
+  value       = aws_secretsmanager_secret.decoy.arn
 }
 
 output "decoy_aws_access_key_id" {
@@ -13,8 +14,9 @@ output "decoy_aws_access_key_id" {
 }
 
 output "decoy_aws_secret_access_key" {
-  value     = local.plant_iam ? aws_iam_access_key.decoy[0].secret : null
-  sensitive = true
+  description = "Secret for decoy_aws_access_key_id. Null when iam_key_decoy is false."
+  value       = local.plant_iam ? aws_iam_access_key.decoy[0].secret : null
+  sensitive   = true
 }
 
 output "forwarder_inputs" {

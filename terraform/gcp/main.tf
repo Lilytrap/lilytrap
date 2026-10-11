@@ -224,9 +224,11 @@ data "http" "register" {
 }
 
 output "deployment_id" {
-  value = local.manifest.buildId
+  description = "Lilytrap deployment id for these decoys."
+  value       = local.manifest.buildId
 }
 
 output "decoy_secret" {
-  value = google_secret_manager_secret.decoy.id
+  description = "Resource name of the decoy secret."
+  value       = google_secret_manager_secret.decoy.id
 }
