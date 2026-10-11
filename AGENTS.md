@@ -20,6 +20,7 @@ You are a coding agent. A human asked you to add Lilytrap to a project, change h
 - A workspace id starts with `ws_`. It isn't secret. It goes in workflow files.
 - GitHub Actions authenticate with GitHub OIDC. They need `permissions: id-token: write` and the `workspace` input. They need no secret.
 - Everything is JSON. Errors look like `{"error": "<code>", "message": "<what to do>"}`. Read `message`.
+- Don't sign up more than once. If the human already has a workspace, use its API key. Signups are limited per IP and per GitHub owner.
 
 ## Rules
 

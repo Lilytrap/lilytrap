@@ -310,8 +310,10 @@ function segmentRegex(seg) {
         continue;
       }
       let cls = seg.slice(i + 1, end);
-      if (cls.startsWith("!")) cls = `^${cls.slice(1)}`;
-      out += `[${cls.replace(/\\/g, "\\\\").replace(/\//g, "")}]`;
+      const negated = cls.startsWith("!") || cls.startsWith("^");
+      if (negated) cls = cls.slice(1);
+      const inner = [...cls].filter((ch) => ch !== "/").map((ch) => ch === "-" ? ch : ch.replace(/[\\\]\[^]/g, "\\$&")).join("");
+      out += `[${negated ? "^" : ""}${inner}]`;
       new RegExp(out);
       i = end;
     } else {

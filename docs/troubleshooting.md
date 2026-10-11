@@ -31,6 +31,14 @@ The key is wrong or was rotated. Keys start with `wsk_`. `POST /agent/v1/api-key
 
 A decoy was planted at a path the workspace's ignore rules exclude. Usually the CLI is older than the rules. Use `@v0` or a recent release. Check paths with `node lilytrap.mjs ignore check <path>...`.
 
+### `409 decoy_conflict`
+
+The build contains a decoy secret that another workspace registered first. A decoy belongs to the workspace that registered it. Plant fresh decoys with a new build. Never copy decoys between workspaces.
+
+### `429 rate_limited` or `429 too_many_signups`
+
+`rate_limited`: too many requests from one IP address. Wait a few minutes. `too_many_signups`: 5 workspaces were already created for that GitHub owner today. Use the existing workspace's API key. See [api.md](api.md#limits).
+
 ### `400 invalid_manifest`
 
 The build manifest is malformed. Don't edit it by hand. Re-run the step.

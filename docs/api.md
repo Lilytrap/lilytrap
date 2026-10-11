@@ -105,12 +105,20 @@ With OIDC, send the token as `Authorization: Bearer <token>` and the workspace i
 
 `GET /feeds/v1/blocklist`, with the feed key as basic-auth password or bearer token. One IP per line. `?format=json` returns `{generatedAt, entries: [{ip, incidentId, severity, classification, lastSeen, expiresAt}]}`. See [blocking.md](blocking.md#firewall-feed).
 
-## Rate limits
+## Limits
 
-| Route | Steady | Burst |
-|---|---|---|
-| Most routes | 20 per second | 40 |
-| `POST /agent/v1/signup` | 1 per second | 5 |
-| `GET /feeds/v1/blocklist` | 5 per second | 10 |
+Per client IP address, enforced at the edge:
 
-Over the limit returns `429`. Wait and retry.
+| Route | Limit |
+|---|---|
+| `POST /agent/v1/signup` | 10 per 5 minutes |
+| Everything else on `api.lilytrap.com` | 2,000 per 5 minutes |
+
+Over a limit returns `429` with `{"error":"rate_limited"}`. Wait a few minutes and retry.
+
+Per workspace:
+
+| What | Limit |
+|---|---|
+| New workspaces per GitHub owner | 5 per day. Over it returns `429 too_many_signups`. |
+| Stored events per attacker | 1,000 per day. Past it, that attacker's events are counted, not stored or alerted. Other attackers are unaffected. |
